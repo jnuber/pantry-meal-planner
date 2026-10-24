@@ -74,7 +74,7 @@ if ai_provider == "Google Gemini API":
 else:
     ollama_model = st.sidebar.text_input("Ollama Model Name:", value="llama3.2")
     st.sidebar.caption("Ensure Ollama is running (`ollama run llama3.2`) on port 11434.")
-    
+
 st.sidebar.markdown("---")
 st.sidebar.subheader("🍽️ Household Preferences")
 appliances = st.sidebar.multiselect(
@@ -193,7 +193,7 @@ Please generate 2 distinct recipe suggestions. For each recipe provide:
                         else:
                             client = genai.Client(api_key=gemini_key)
                             response = client.models.generate_content(
-                                model="gemini-2.5-flash",
+                                model="gemini-3.8-flash",
                                 contents=prompt,
                             )
                             recipe_result = response.text
