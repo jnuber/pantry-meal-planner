@@ -1,0 +1,13 @@
+# .cursorrules
+[environment]
+os = "Fedora Linux"
+desktop = "KDE Plasma"
+architecture = "x86_64"
+python_version = "3.11+"
+
+[guidelines]
+- Use Streamlit for the local web UI (runs fast on desktop browsers).
+- Use SQLite (standard library) for local persistent pantry inventory and saved recipes.
+- Provide clean, modern UI components with easy tags for pantry items, dietary preferences, and appliances (Air Fryer, Instant Pot, Oven, Stove).
+- Support both Gemini API (free tier) and local Ollama endpoint (http://localhost:11434) for AI generation.
+- Keep external Python dependencies light and standard.

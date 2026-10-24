@@ -1,0 +1,4 @@
+venv/
+.DS_Store
+pantry.db
+.streamlit/secrets.toml
