@@ -410,7 +410,89 @@ def delete_saved_recipe(recipe_id):
     supabase.table("saved_recipes").delete().eq("id", recipe_id).execute()
 
 
-st.title("🍳 Automated Household Meal Planner & Pantry Recipe Generator")
+HELP_GUIDE = """
+### Welcome
+Pantry Chef turns what you already have on hand into meal ideas. Work left to right: set household preferences, stock the pantry, generate recipes, then save the ones you want to cook.
+
+### Sidebar: AI and household setup
+- **AI engine:** Google Gemini uses the key in Streamlit secrets. Local Ollama talks to a model on port 11434.
+- **Appliances and diets:** Select what matches your kitchen. Open **Add / remove custom options** to type extras (for example a pizza oven or a Jain diet).
+- **Measurement system:** Imperial or Metric is the default for new pantry items. You can still change units on each item.
+
+### Pantry Inventory
+Add an ingredient name, category, amount, and unit. Choosing **Imperial** or **Metric** on the item switches the unit list (`oz` / `lb` / `cup` versus `g` / `kg` / `ml`). Adding an existing name updates that item. Use the table and **Delete Selected Item** to remove something you used up.
+
+### Recipe Generator
+Pick which pantry items to cook with, add an optional craving (such as “quick 20-minute dinner”), then generate ideas. The chef usually returns **two** recipes.
+
+Each recipe has its own card. Check the ones you want, then **Save selected**. **Save all separately** stores every suggestion as its own Household Favorite. Uncheck a card if you only want the other one.
+
+### Saved Recipes
+Favorites are stored in Supabase, one entry per recipe. Open a card to reread it, and delete any you no longer want.
+
+### Tips
+- Be specific in the extra prompt (“air fryer, high protein”) so the chef stays inside your appliances and diet.
+- Keep amounts up to date so generated recipes know how much you actually have.
+- If generation fails, confirm the Gemini key or that Ollama is running.
+"""
+
+CHEF_HELP_ICON = (
+    "data:image/svg+xml,"
+    "%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E"
+    "%3Cellipse cx='32' cy='23' rx='21' ry='15' fill='%23fffaf3' stroke='%233d2b1f' stroke-width='2.2'/%3E"
+    "%3Cpath d='M14 26c1-11 8-18 18-18s17 7 18 18' fill='%23fffaf3' stroke='%233d2b1f' stroke-width='2.2' "
+    "stroke-linejoin='round'/%3E"
+    "%3Crect x='17' y='33' width='30' height='12' rx='4' fill='%23fffaf3' stroke='%233d2b1f' stroke-width='2.2'/%3E"
+    "%3Ccircle cx='32' cy='22' r='9' fill='%23c45c26'/%3E"
+    "%3Ctext x='32' y='27.5' text-anchor='middle' font-family='Georgia,Times,serif' font-size='16' "
+    "font-weight='700' fill='%23fffaf3'%3E?%3C/text%3E"
+    "%3C/svg%3E"
+)
+
+st.markdown(
+    f"""
+    <style>
+      .st-key-chef_help_corner {{
+        display: flex;
+        justify-content: flex-end;
+      }}
+      .st-key-chef_help_corner button {{
+        width: 56px !important;
+        height: 56px !important;
+        min-height: 56px !important;
+        border-radius: 50% !important;
+        padding: 0 !important;
+        border: 1px solid rgba(61, 43, 31, 0.18) !important;
+        background: #fffaf3 url("{CHEF_HELP_ICON}") center / 42px 42px no-repeat !important;
+        box-shadow: 0 4px 14px rgba(61, 43, 31, 0.12);
+      }}
+      .st-key-chef_help_corner button:hover {{
+        transform: scale(1.05);
+        box-shadow: 0 6px 16px rgba(61, 43, 31, 0.18);
+      }}
+      .st-key-chef_help_corner button p,
+      .st-key-chef_help_corner button span {{
+        font-size: 0 !important;
+        color: transparent !important;
+      }}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+@st.dialog("Kitchen Help", width="large")
+def show_help_dialog():
+    st.markdown(HELP_GUIDE)
+
+
+title_col, help_col = st.columns([0.9, 0.1], vertical_alignment="center")
+with title_col:
+    st.title("🍳 Automated Household Meal Planner & Pantry Recipe Generator")
+with help_col:
+    with st.container(key="chef_help_corner", horizontal_alignment="right"):
+        if st.button("Help", key="chef_help_btn", help="Open the kitchen help guide"):
+            show_help_dialog()
 
 # --- SIDEBAR: SETTINGS & LLM CHOICE ---
 st.sidebar.caption("☁️ Connected to Supabase")
