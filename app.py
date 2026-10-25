@@ -1,3 +1,4 @@
+import json
 import re
 import streamlit as st
 import pandas as pd
@@ -136,6 +137,91 @@ def parse_quantity(raw):
         amount, unit = "1", text
     unit = normalize_unit(unit) or "each"
     return amount, unit, detect_unit_system(unit)
+
+
+def recipe_to_markdown(recipe):
+    if recipe.get("markdown"):
+        return recipe["markdown"]
+    lines = [f"## {recipe.get('title') or 'Recipe'}"]
+    prep = recipe.get("prep_time")
+    cook = recipe.get("cook_time")
+    if prep or cook:
+        lines.append(f"**Prep:** {prep or '—'}  ·  **Cook:** {cook or '—'}")
+    ingredients = recipe.get("ingredients") or []
+    if ingredients:
+        lines.append("### Ingredients")
+        lines.extend(f"- {item}" for item in ingredients)
+    instructions = recipe.get("instructions") or []
+    if instructions:
+        lines.append("### Instructions")
+        if isinstance(instructions, str):
+            lines.append(instructions)
+        else:
+            lines.extend(f"{index}. {step}" for index, step in enumerate(instructions, 1))
+    return "\n\n".join(lines)
+
+
+def _title_from_markdown(text, fallback="Generated Recipe"):
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        return re.sub(r"^#{1,6}\s*", "", stripped).strip(" *-")[:120] or fallback
+    return fallback
+
+
+def split_markdown_recipes(text):
+    chunks = [part.strip() for part in re.split(r"(?=^#{1,3}\s+)", text.strip(), flags=re.M) if part.strip()]
+    if len(chunks) < 2:
+        chunks = [
+            part.strip()
+            for part in re.split(r"(?=^\s*(?:\*\*)?Recipe\s+\d+)", text.strip(), flags=re.I | re.M)
+            if part.strip()
+        ]
+    if not chunks:
+        chunks = [text.strip()]
+    recipes = []
+    for index, chunk in enumerate(chunks, 1):
+        recipes.append(
+            {
+                "title": _title_from_markdown(chunk, f"Generated Recipe {index}"),
+                "markdown": chunk,
+            }
+        )
+    return recipes
+
+
+def parse_generated_recipes(raw_text):
+    text = (raw_text or "").strip()
+    if not text:
+        return []
+    payload = text
+    fenced = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
+    if fenced:
+        payload = fenced.group(1).strip()
+    try:
+        data = json.loads(payload)
+        if isinstance(data, dict):
+            data = data.get("recipes") or data.get("suggestions") or [data]
+        if isinstance(data, list) and data:
+            recipes = []
+            for index, item in enumerate(data, 1):
+                if not isinstance(item, dict):
+                    continue
+                recipe = {
+                    "title": (item.get("title") or f"Generated Recipe {index}").strip()[:120],
+                    "prep_time": item.get("prep_time") or item.get("prepTime"),
+                    "cook_time": item.get("cook_time") or item.get("cookTime"),
+                    "ingredients": item.get("ingredients") or [],
+                    "instructions": item.get("instructions") or item.get("steps") or [],
+                }
+                recipe["markdown"] = recipe_to_markdown(recipe)
+                recipes.append(recipe)
+            if recipes:
+                return recipes
+    except (json.JSONDecodeError, TypeError, ValueError):
+        pass
+    return split_markdown_recipes(text)
 
 
 DEFAULT_DIETARY = [
@@ -563,11 +649,10 @@ Dietary restrictions: {', '.join(dietary_restrictions)}
 Servings: {servings}
 Additional Request: {additional_notes}
 
-Please generate 2 distinct recipe suggestions. For each recipe provide:
-1. Recipe Title
-2. Prep Time & Cook Time
-3. Ingredients List (highlighting which are from the list and standard pantry staples like oil/salt)
-4. Step-by-Step Cooking Instructions
+Generate 2 distinct recipe suggestions.
+Return ONLY valid JSON (no markdown fences) as an array of objects with keys:
+title, prep_time, cook_time, ingredients (array of strings), instructions (array of step strings).
+In ingredients, note which items came from the pantry list versus staples like oil/salt.
 """
             with st.spinner("Chef AI is creating recipes..."):
                 recipe_result = ""
@@ -598,44 +683,82 @@ Please generate 2 distinct recipe suggestions. For each recipe provide:
                             st.error(f"Ollama error: {res.text}")
 
                     if recipe_result:
+                        recipes = parse_generated_recipes(recipe_result)
                         st.session_state["last_recipe"] = recipe_result
-                        title_line = next(
-                            (
-                                line.strip("# ").strip()
-                                for line in recipe_result.splitlines()
-                                if line.strip()
-                            ),
-                            "Generated Recipe",
-                        )
-                        st.session_state["last_recipe_title"] = title_line[:120]
+                        st.session_state["generated_recipes"] = recipes
                         st.session_state["last_recipe_ingredients"] = ", ".join(selected_pantry)
+                        for key in list(st.session_state.keys()):
+                            if str(key).startswith("save_pick_"):
+                                del st.session_state[key]
 
                 except Exception as e:
                     st.error(f"Error generating recipe: {str(e)}")
 
-    if st.session_state.get("last_recipe"):
-        recipe_result = st.session_state["last_recipe"]
+    generated_recipes = st.session_state.get("generated_recipes") or []
+    if generated_recipes:
         st.markdown("### 🍽️ Generated Recipes")
-        st.markdown(recipe_result)
+        if len(generated_recipes) > 1:
+            st.caption("Select the recipes you want to keep. Saving all stores each one as its own favorite.")
 
+        selected_to_save = []
+        for index, recipe in enumerate(generated_recipes):
+            title = recipe.get("title") or f"Generated Recipe {index + 1}"
+            markdown = recipe_to_markdown(recipe)
+            with st.expander(title, expanded=True):
+                st.markdown(markdown)
+                chosen = st.checkbox(
+                    f"Select “{title}” to save",
+                    value=True,
+                    key=f"save_pick_{index}",
+                )
+            if chosen:
+                selected_to_save.append(recipe)
+
+        combined_markdown = "\n\n---\n\n".join(recipe_to_markdown(recipe) for recipe in generated_recipes)
         st.download_button(
-            "📥 Save Recipe Output as Markdown",
-            data=recipe_result,
-            file_name="recipe.md",
+            "📥 Download all as Markdown",
+            data=combined_markdown,
+            file_name="recipes.md",
             mime="text/markdown",
         )
 
-        if st.button("⭐ Save to Household Favorites"):
-            try:
-                save_favorite_recipe(
-                    st.session_state.get("last_recipe_title", "Generated Recipe"),
-                    st.session_state.get("last_recipe_ingredients", ""),
-                    recipe_result,
-                )
-                st.success("Saved to Household Favorites.")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Could not save recipe: {e}")
+        save_col, save_all_col = st.columns(2)
+        pantry_used = st.session_state.get("last_recipe_ingredients", "")
+
+        def _save_recipe_list(recipes_to_store):
+            if not recipes_to_store:
+                st.warning("Select at least one recipe to save.")
+                return
+            saved_titles = []
+            for recipe in recipes_to_store:
+                title = recipe.get("title") or "Generated Recipe"
+                save_favorite_recipe(title, pantry_used, recipe_to_markdown(recipe))
+                saved_titles.append(title)
+            st.success(
+                "Saved "
+                + (", ".join(f"“{name}”" for name in saved_titles))
+                + " as separate favorites."
+            )
+            st.rerun()
+
+        with save_col:
+            if st.button("⭐ Save selected", type="primary"):
+                try:
+                    _save_recipe_list(selected_to_save)
+                except Exception as e:
+                    st.error(f"Could not save recipe: {e}")
+        with save_all_col:
+            if len(generated_recipes) > 1:
+                if st.button("⭐ Save all separately"):
+                    try:
+                        _save_recipe_list(generated_recipes)
+                    except Exception as e:
+                        st.error(f"Could not save recipes: {e}")
+            else:
+                st.caption("Only one recipe was generated.")
+    elif st.session_state.get("last_recipe"):
+        st.markdown("### 🍽️ Generated Recipes")
+        st.markdown(st.session_state["last_recipe"])
 
 # --- TAB 3: SAVED RECIPES ---
 with tab3:
