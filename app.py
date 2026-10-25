@@ -1,13 +1,9 @@
 import re
 import streamlit as st
-import sqlite3
 import pandas as pd
 import requests
-import os
 from google import genai
-
-# --- DATABASE SETUP ---
-DB_FILE = "pantry.db"
+from supabase import create_client, Client
 
 DEFAULT_APPLIANCES = [
     "Oven",
@@ -170,120 +166,42 @@ DEFAULT_DIETARY = [
 ]
 
 
-def get_conn():
-    return sqlite3.connect(DB_FILE)
+def quantity_value(amount_text):
+    text = str(amount_text).strip()
+    if re.fullmatch(r"\d+", text):
+        return int(text)
+    try:
+        if "/" in text:
+            numerator, denominator = text.split("/", 1)
+            return float(numerator) / float(denominator)
+        value = float(text)
+        return int(value) if value.is_integer() else value
+    except (TypeError, ValueError, ZeroDivisionError):
+        return text
 
 
-def init_db():
-    conn = get_conn()
-    c = conn.cursor()
-    c.execute(
-        """
-        CREATE TABLE IF NOT EXISTS inventory (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            item TEXT UNIQUE,
-            category TEXT,
-            quantity TEXT
+def inventory_records(rows):
+    records = []
+    for row in rows or []:
+        name = row.get("ingredient_name") or row.get("item") or ""
+        unit = row.get("unit") or ""
+        amount = row.get("quantity")
+        if amount is None:
+            amount = row.get("amount")
+        unit_system = row.get("unit_system") or detect_unit_system(unit)
+        records.append(
+            {
+                "id": row.get("id"),
+                "item": name,
+                "category": row.get("category") or "",
+                "amount": amount,
+                "unit": unit,
+                "unit_system": unit_system,
+                "quantity": format_quantity(amount, unit),
+            }
         )
-        """
-    )
-    c.execute(
-        """
-        CREATE TABLE IF NOT EXISTS recipes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            title TEXT,
-            ingredients TEXT,
-            instructions TEXT,
-            date_saved DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-        """
-    )
-    c.execute(
-        """
-        CREATE TABLE IF NOT EXISTS custom_tags (
-            kind TEXT NOT NULL,
-            name TEXT NOT NULL,
-            UNIQUE(kind, name)
-        )
-        """
-    )
-    columns = {row[1] for row in c.execute("PRAGMA table_info(inventory)")}
-    for column, definition in (
-        ("amount", "TEXT"),
-        ("unit", "TEXT"),
-        ("unit_system", "TEXT"),
-    ):
-        if column not in columns:
-            c.execute(f"ALTER TABLE inventory ADD COLUMN {column} {definition}")
-    rows = c.execute(
-        "SELECT id, quantity, amount, unit, unit_system FROM inventory"
-    ).fetchall()
-    for row_id, quantity, amount, unit, unit_system in rows:
-        if amount and unit:
-            continue
-        parsed_amount, parsed_unit, parsed_system = parse_quantity(quantity)
-        c.execute(
-            """
-            UPDATE inventory
-            SET amount = ?, unit = ?, unit_system = ?, quantity = ?
-            WHERE id = ?
-            """,
-            (
-                parsed_amount,
-                parsed_unit,
-                parsed_system,
-                format_quantity(parsed_amount, parsed_unit),
-                row_id,
-            ),
-        )
-    conn.commit()
-    conn.close()
+    return records
 
-
-def load_tag_options(kind, defaults):
-    conn = get_conn()
-    rows = conn.execute(
-        "SELECT name FROM custom_tags WHERE kind = ? ORDER BY name COLLATE NOCASE",
-        (kind,),
-    ).fetchall()
-    conn.close()
-    extras = [row[0] for row in rows if row[0] not in defaults]
-    return defaults + extras
-
-
-def add_custom_tag(kind, name, existing):
-    cleaned = " ".join(name.strip().split())
-    if not cleaned:
-        return None
-    if cleaned not in existing:
-        conn = get_conn()
-        conn.execute(
-            "INSERT OR IGNORE INTO custom_tags (kind, name) VALUES (?, ?)",
-            (kind, cleaned),
-        )
-        conn.commit()
-        conn.close()
-    return cleaned
-
-
-def remove_custom_tag(kind, name):
-    conn = get_conn()
-    conn.execute("DELETE FROM custom_tags WHERE kind = ? AND name = ?", (kind, name))
-    conn.commit()
-    conn.close()
-
-
-def custom_tag_names(kind):
-    conn = get_conn()
-    rows = conn.execute(
-        "SELECT name FROM custom_tags WHERE kind = ? ORDER BY name COLLATE NOCASE",
-        (kind,),
-    ).fetchall()
-    conn.close()
-    return [row[0] for row in rows]
-
-
-init_db()
 
 # --- STREAMLIT UI CONFIG ---
 st.set_page_config(
@@ -292,9 +210,124 @@ st.set_page_config(
     layout="wide",
 )
 
+
+@st.cache_resource
+def init_supabase() -> Client:
+    url = st.secrets["SUPABASE_URL"]
+    key = st.secrets["SUPABASE_KEY"]
+    return create_client(url, key)
+
+
+try:
+    supabase: Client = init_supabase()
+except Exception:
+    st.error("Add SUPABASE_URL and SUPABASE_KEY to `.streamlit/secrets.toml`, then rerun.")
+    st.stop()
+
+
+def load_tag_options(kind, defaults):
+    response = supabase.table("custom_tags").select("name").eq("kind", kind).order("name").execute()
+    extras = [row["name"] for row in (response.data or []) if row.get("name") and row["name"] not in defaults]
+    return defaults + extras
+
+
+def add_custom_tag(kind, name, existing):
+    cleaned = " ".join(name.strip().split())
+    if not cleaned:
+        return None
+    if cleaned not in existing:
+        supabase.table("custom_tags").upsert(
+            {"kind": kind, "name": cleaned},
+            on_conflict="kind,name",
+        ).execute()
+    return cleaned
+
+
+def remove_custom_tag(kind, name):
+    supabase.table("custom_tags").delete().eq("kind", kind).eq("name", name).execute()
+
+
+def custom_tag_names(kind):
+    response = supabase.table("custom_tags").select("name").eq("kind", kind).order("name").execute()
+    return [row["name"] for row in (response.data or []) if row.get("name")]
+
+
+def fetch_inventory_df():
+    response = (
+        supabase.table("pantry_inventory")
+        .select("*")
+        .order("category")
+        .order("ingredient_name")
+        .execute()
+    )
+    records = inventory_records(response.data)
+    return pd.DataFrame(records)
+
+
+def upsert_inventory_item(name, category, amount_value, unit_value, unit_system):
+    payload = {
+        "ingredient_name": name,
+        "category": category,
+        "quantity": quantity_value(amount_value),
+        "unit": unit_value,
+        "unit_system": unit_system,
+    }
+    try:
+        supabase.table("pantry_inventory").upsert(
+            payload,
+            on_conflict="ingredient_name",
+        ).execute()
+    except Exception:
+        payload.pop("unit_system", None)
+        supabase.table("pantry_inventory").upsert(
+            payload,
+            on_conflict="ingredient_name",
+        ).execute()
+
+
+def delete_inventory_item(name):
+    supabase.table("pantry_inventory").delete().eq("ingredient_name", name).execute()
+
+
+def save_favorite_recipe(title, ingredients, instructions):
+    supabase.table("saved_recipes").insert(
+        {
+            "title": title,
+            "ingredients": ingredients,
+            "instructions": instructions,
+        }
+    ).execute()
+
+
+def fetch_saved_recipes_df():
+    response = (
+        supabase.table("saved_recipes")
+        .select("*")
+        .order("created_at", desc=True)
+        .execute()
+    )
+    rows = []
+    for row in response.data or []:
+        rows.append(
+            {
+                "id": row.get("id"),
+                "title": row.get("title") or "Generated Recipe",
+                "ingredients": row.get("ingredients") or "",
+                "instructions": row.get("instructions") or "",
+                "date_saved": row.get("date_saved") or row.get("created_at") or "",
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def delete_saved_recipe(recipe_id):
+    supabase.table("saved_recipes").delete().eq("id", recipe_id).execute()
+
+
 st.title("🍳 Automated Household Meal Planner & Pantry Recipe Generator")
 
 # --- SIDEBAR: SETTINGS & LLM CHOICE ---
+st.sidebar.caption("☁️ Connected to Supabase")
 st.sidebar.header("⚙️ AI & Configuration Settings")
 ai_provider = st.sidebar.radio("Select AI Engine:", ["Google Gemini API", "Local Ollama (CPU)"])
 
@@ -320,8 +353,13 @@ else:
 st.sidebar.markdown("---")
 st.sidebar.subheader("🍽️ Household Preferences")
 
-appliance_options = load_tag_options("appliance", DEFAULT_APPLIANCES)
-dietary_options = load_tag_options("dietary", DEFAULT_DIETARY)
+try:
+    appliance_options = load_tag_options("appliance", DEFAULT_APPLIANCES)
+    dietary_options = load_tag_options("dietary", DEFAULT_DIETARY)
+except Exception as e:
+    appliance_options = list(DEFAULT_APPLIANCES)
+    dietary_options = list(DEFAULT_DIETARY)
+    st.sidebar.warning(f"Custom preference lists could not be loaded: {e}")
 
 
 def _drop_none_if_other_dietary():
@@ -439,45 +477,26 @@ with tab1:
                 amount_value = amount.strip() or "1"
                 unit_value = normalize_unit(unit)
                 quantity = format_quantity(amount_value, unit_value)
-                conn = get_conn()
-                c = conn.cursor()
-                c.execute(
-                    """
-                    INSERT INTO inventory (item, category, quantity, amount, unit, unit_system)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(item) DO UPDATE SET
-                        category = excluded.category,
-                        quantity = excluded.quantity,
-                        amount = excluded.amount,
-                        unit = excluded.unit,
-                        unit_system = excluded.unit_system
-                    """,
-                    (
+                try:
+                    upsert_inventory_item(
                         new_item.strip().title(),
                         category,
-                        quantity,
                         amount_value,
                         unit_value,
                         unit_system,
-                    ),
-                )
-                conn.commit()
-                conn.close()
-                st.success(f"Added '{new_item}' ({quantity}) to pantry!")
-                st.rerun()
+                    )
+                    st.success(f"Added '{new_item}' ({quantity}) to pantry!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Could not save pantry item: {e}")
 
     with col2:
         st.subheader("Items on Hand")
-        conn = get_conn()
-        df = pd.read_sql_query(
-            """
-            SELECT id, item, category, amount, unit, unit_system, quantity
-            FROM inventory
-            ORDER BY category, item
-            """,
-            conn,
-        )
-        conn.close()
+        try:
+            df = fetch_inventory_df()
+        except Exception as e:
+            df = pd.DataFrame()
+            st.error(f"Could not load pantry inventory: {e}")
 
         if not df.empty:
             display = df.copy()
@@ -497,13 +516,12 @@ with tab1:
 
             delete_id = st.selectbox("Select item to remove:", df["item"].tolist())
             if st.button("Delete Selected Item"):
-                conn = get_conn()
-                c = conn.cursor()
-                c.execute("DELETE FROM inventory WHERE item = ?", (delete_id,))
-                conn.commit()
-                conn.close()
-                st.warning(f"Removed '{delete_id}'.")
-                st.rerun()
+                try:
+                    delete_inventory_item(delete_id)
+                    st.warning(f"Removed '{delete_id}'.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Could not remove item: {e}")
         else:
             st.info("Your pantry is currently empty. Add some items on the left!")
 
@@ -511,11 +529,13 @@ with tab1:
 with tab2:
     st.header("Generate Meal Plan & Recipes")
 
-    conn = get_conn()
-    df_pantry = pd.read_sql_query(
-        "SELECT item, amount, unit, quantity FROM inventory ORDER BY item", conn
-    )
-    conn.close()
+    try:
+        df_pantry = fetch_inventory_df()
+        if not df_pantry.empty:
+            df_pantry = df_pantry.sort_values("item")
+    except Exception as e:
+        df_pantry = pd.DataFrame()
+        st.error(f"Could not load pantry ingredients: {e}")
 
     pantry_list = df_pantry["item"].tolist() if not df_pantry.empty else []
     pantry_qty_by_item = {}
@@ -606,32 +626,27 @@ Please generate 2 distinct recipe suggestions. For each recipe provide:
         )
 
         if st.button("⭐ Save to Household Favorites"):
-            conn = get_conn()
-            c = conn.cursor()
-            c.execute(
-                "INSERT INTO recipes (title, ingredients, instructions) VALUES (?, ?, ?)",
-                (
+            try:
+                save_favorite_recipe(
                     st.session_state.get("last_recipe_title", "Generated Recipe"),
                     st.session_state.get("last_recipe_ingredients", ""),
                     recipe_result,
-                ),
-            )
-            conn.commit()
-            conn.close()
-            st.success("Saved to Household Favorites.")
-            st.rerun()
+                )
+                st.success("Saved to Household Favorites.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Could not save recipe: {e}")
 
 # --- TAB 3: SAVED RECIPES ---
 with tab3:
     st.header("Saved Household Favorites")
     st.info("Archive recipes generated from your pantry so you can cook them again later.")
 
-    conn = get_conn()
-    df_recipes = pd.read_sql_query(
-        "SELECT id, title, ingredients, instructions, date_saved FROM recipes ORDER BY date_saved DESC",
-        conn,
-    )
-    conn.close()
+    try:
+        df_recipes = fetch_saved_recipes_df()
+    except Exception as e:
+        df_recipes = pd.DataFrame()
+        st.error(f"Could not load saved recipes: {e}")
 
     if df_recipes.empty:
         st.caption("No saved recipes yet. Generate a recipe, then click Save to Household Favorites.")
@@ -642,9 +657,8 @@ with tab3:
                     st.caption(f"Pantry ingredients used: {row['ingredients']}")
                 st.markdown(row["instructions"])
                 if st.button("Delete recipe", key=f"delete_recipe_{row['id']}"):
-                    conn = get_conn()
-                    c = conn.cursor()
-                    c.execute("DELETE FROM recipes WHERE id = ?", (int(row["id"]),))
-                    conn.commit()
-                    conn.close()
-                    st.rerun()
+                    try:
+                        delete_saved_recipe(row["id"])
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Could not delete recipe: {e}")
