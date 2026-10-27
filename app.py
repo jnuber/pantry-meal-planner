@@ -487,14 +487,26 @@ def fetch_saved_recipes_df():
                 "rating": _parse_rating(row.get("rating")),
             }
         )
-    df = pd.DataFrame(rows)
-    if df.empty:
+    return pd.DataFrame(rows)
+
+
+def sort_saved_recipes(df, sort_by, sort_order="Descending"):
+    if df is None or df.empty:
         return df
-    return df.sort_values(
-        by=["rating", "date_saved"],
-        ascending=[False, False],
-        na_position="last",
-    )
+    ascending = sort_order == "Ascending"
+    ordered = df.copy()
+    ordered["_title_sort"] = ordered["title"].astype(str).str.casefold()
+    if sort_by == "Name":
+        ordered = ordered.sort_values("_title_sort", ascending=ascending, kind="mergesort")
+    else:
+        ordered["_rating_sort"] = pd.to_numeric(ordered["rating"], errors="coerce").fillna(0)
+        ordered = ordered.sort_values(
+            by=["_rating_sort", "_title_sort"],
+            ascending=[ascending, True],
+            kind="mergesort",
+        )
+        ordered = ordered.drop(columns=["_rating_sort"])
+    return ordered.drop(columns=["_title_sort"])
 
 
 def delete_saved_recipe(recipe_id):
@@ -526,7 +538,7 @@ Pick which pantry items to cook with, add an optional craving (such as “quick 
 Each recipe has its own card. Check the ones you want, then **Save selected**. **Save all separately** stores every suggestion as its own Household Favorite. Uncheck a card if you only want the other one.
 
 ### Saved Recipes
-Favorites are stored in Supabase, one entry per recipe. Open a card to reread it. **Rate favorite** opens a 5-star dialog. **Delete favorite** removes it after you confirm.
+Favorites are stored in Supabase, one entry per recipe. Sort the list by **name** or **rating**, then choose **ascending** or **descending**. Open a card to reread it. **Rate favorite** opens a 5-star dialog. **Delete favorite** removes it after you confirm.
 
 ### Tips
 - Be specific in the extra prompt (“air fryer, high protein”) so the chef stays inside your appliances and diet.
@@ -1124,9 +1136,25 @@ with tab3:
     if df_recipes.empty:
         st.caption("No saved recipes yet. Generate a recipe, then click Save to Household Favorites.")
     else:
+        sort_col, order_col = st.columns(2)
+        with sort_col:
+            sort_by = st.radio(
+                "Sort favorites by:",
+                ["Rating", "Name"],
+                horizontal=True,
+                key="favorite_sort",
+            )
+        with order_col:
+            sort_order = st.radio(
+                "Order:",
+                ["Descending", "Ascending"],
+                horizontal=True,
+                key="favorite_sort_order",
+            )
+        df_recipes = sort_saved_recipes(df_recipes, sort_by, sort_order)
         for _, row in df_recipes.iterrows():
             recipe = row.to_dict()
-            heading = f"{recipe['title']}  ·  {format_star_rating(recipe.get('rating'))}  ·  {recipe['date_saved']}"
+            heading = f"{recipe['title']}  ·  {format_star_rating(recipe.get('rating'))}"
             with st.expander(heading):
                 recipe_col, rating_col = st.columns([0.82, 0.18], vertical_alignment="top")
                 with recipe_col:
