@@ -429,6 +429,21 @@ def save_favorite_recipe(title, ingredients, instructions):
     ).execute()
 
 
+def _text_or_empty(value):
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    return str(value).strip()
+
+
+def has_recipe_comment(recipe):
+    return bool(_text_or_empty((recipe or {}).get("comment")))
+
+
 def _parse_rating(value):
     if value is None:
         return None
@@ -485,6 +500,7 @@ def fetch_saved_recipes_df():
                 "instructions": row.get("instructions") or "",
                 "date_saved": row.get("date_saved") or row.get("created_at") or "",
                 "rating": _parse_rating(row.get("rating")),
+                "comment": _text_or_empty(row.get("comment") or row.get("notes")),
             }
         )
     return pd.DataFrame(rows)
@@ -520,6 +536,22 @@ def update_recipe_rating(recipe_id, rating):
     supabase.table("saved_recipes").update({"rating": parsed}).eq("id", recipe_id).execute()
 
 
+def update_saved_recipe(recipe_id, title, ingredients, instructions):
+    cleaned_title = (title or "").strip() or "Generated Recipe"
+    supabase.table("saved_recipes").update(
+        {
+            "title": cleaned_title,
+            "ingredients": (ingredients or "").strip(),
+            "instructions": (instructions or "").strip(),
+        }
+    ).eq("id", recipe_id).execute()
+
+
+def update_recipe_comment(recipe_id, comment):
+    text = _text_or_empty(comment)
+    supabase.table("saved_recipes").update({"comment": text or None}).eq("id", recipe_id).execute()
+
+
 HELP_GUIDE = """
 ### Welcome
 Pantry Chef turns what you already have on hand into meal ideas. Work left to right: set household preferences, stock the pantry, generate recipes, then save the ones you want to cook.
@@ -538,7 +570,7 @@ Pick which pantry items to cook with, add an optional craving (such as “quick 
 Each recipe has its own card. Check the ones you want, then **Save selected**. **Save all separately** stores every suggestion as its own Household Favorite. Uncheck a card if you only want the other one.
 
 ### Saved Recipes
-Favorites are stored in Supabase, one entry per recipe. Sort the list by **name** or **rating**, then choose **ascending** or **descending**. Open a card to reread it. **Rate favorite** opens a 5-star dialog. **Delete favorite** removes it after you confirm.
+Favorites are stored in Supabase, one entry per recipe. Sort the list by **name** or **rating**, then choose **ascending** or **descending**. Open a card to reread it. **Edit recipe** changes the title, pantry line, or instructions. **Add comment** / the 💬 note badge opens a kitchen note. **Rate favorite** opens a 5-star dialog. **Delete favorite** removes it after you confirm.
 
 ### Tips
 - Be specific in the extra prompt (“air fryer, high protein”) so the chef stays inside your appliances and diet.
@@ -683,6 +715,30 @@ def _open_delete_dialog(recipe):
     st.session_state.show_delete_dialog = True
 
 
+def _close_edit_favorite_dialog():
+    st.session_state.show_edit_favorite_dialog = False
+
+
+def _close_comment_dialog():
+    st.session_state.show_comment_dialog = False
+
+
+def _open_edit_favorite_dialog(recipe):
+    item = dict(recipe)
+    st.session_state.edit_favorite = item
+    st.session_state.edit_fav_title = item.get("title") or ""
+    st.session_state.edit_fav_ingredients = item.get("ingredients") or ""
+    st.session_state.edit_fav_instructions = item.get("instructions") or ""
+    st.session_state.show_edit_favorite_dialog = True
+
+
+def _open_comment_dialog(recipe):
+    item = dict(recipe)
+    st.session_state.comment_recipe = item
+    st.session_state.fav_comment_text = item.get("comment") or ""
+    st.session_state.show_comment_dialog = True
+
+
 @st.dialog("Rate this favorite", width="small", on_dismiss=_close_rate_dialog)
 def rate_favorite_dialog():
     recipe = st.session_state.get("rating_recipe") or {}
@@ -731,6 +787,69 @@ def confirm_delete_favorite_dialog():
         if st.button("Keep it"):
             st.session_state.show_delete_dialog = False
             st.rerun()
+
+
+@st.dialog("Edit favorite recipe", width="large", on_dismiss=_close_edit_favorite_dialog)
+def edit_favorite_dialog():
+    recipe = st.session_state.get("edit_favorite") or {}
+    st.caption("Change the title, pantry ingredients, or cooking instructions, then save.")
+    title = st.text_input("Recipe title:", key="edit_fav_title")
+    ingredients = st.text_area("Pantry ingredients used:", key="edit_fav_ingredients", height=80)
+    instructions = st.text_area("Recipe:", key="edit_fav_instructions", height=280)
+    save_col, cancel_col = st.columns(2)
+    with save_col:
+        if st.button("Save recipe", type="primary"):
+            if not (title or "").strip():
+                st.warning("A recipe title is required.")
+            else:
+                try:
+                    update_saved_recipe(
+                        recipe.get("id"),
+                        title,
+                        ingredients,
+                        instructions,
+                    )
+                    st.session_state.show_edit_favorite_dialog = False
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Could not update recipe: {e}")
+    with cancel_col:
+        if st.button("Cancel", key="cancel_edit_favorite"):
+            st.session_state.show_edit_favorite_dialog = False
+            st.rerun()
+
+
+@st.dialog("Kitchen note", width="small", on_dismiss=_close_comment_dialog)
+def recipe_comment_dialog():
+    recipe = st.session_state.get("comment_recipe") or {}
+    title = recipe.get("title") or "this recipe"
+    existing = _text_or_empty(recipe.get("comment"))
+    if existing:
+        st.write(f"Note for **{title}**")
+    else:
+        st.write(f"Add a note for **{title}**")
+        st.caption("Use this for tweaks, leftovers, or how the family liked it.")
+    comment = st.text_area("Comment:", key="fav_comment_text", height=160)
+    save_col, clear_col = st.columns(2)
+    with save_col:
+        if st.button("Save comment", type="primary"):
+            try:
+                update_recipe_comment(recipe.get("id"), comment)
+                st.session_state.show_comment_dialog = False
+                st.rerun()
+            except Exception as e:
+                st.error(f"Could not save comment: {e}")
+    with clear_col:
+        if existing and st.button("Remove comment"):
+            try:
+                update_recipe_comment(recipe.get("id"), "")
+                st.session_state.show_comment_dialog = False
+                st.rerun()
+            except Exception as e:
+                st.error(f"Could not remove comment: {e}")
+    if st.button("Close", key="close_comment_dialog"):
+        st.session_state.show_comment_dialog = False
+        st.rerun()
 
 
 title_col, help_col = st.columns([0.9, 0.1], vertical_alignment="center")
@@ -1154,24 +1273,41 @@ with tab3:
         df_recipes = sort_saved_recipes(df_recipes, sort_by, sort_order)
         for _, row in df_recipes.iterrows():
             recipe = row.to_dict()
-            heading = f"{recipe['title']}  ·  {format_star_rating(recipe.get('rating'))}"
+            note_mark = "  ·  💬" if has_recipe_comment(recipe) else ""
+            heading = f"{recipe['title']}  ·  {format_star_rating(recipe.get('rating'))}{note_mark}"
             with st.expander(heading):
                 recipe_col, rating_col = st.columns([0.82, 0.18], vertical_alignment="top")
                 with recipe_col:
                     if recipe.get("ingredients"):
                         st.caption(f"Pantry ingredients used: {recipe['ingredients']}")
                     st.markdown(recipe["instructions"])
-                    rate_col, delete_col = st.columns(2)
-                    with rate_col:
+                    action_row = st.columns(4)
+                    with action_row[0]:
+                        if st.button("Edit recipe", key=f"edit_recipe_{recipe['id']}"):
+                            _open_edit_favorite_dialog(recipe)
+                    with action_row[1]:
+                        comment_label = "Add comment" if not has_recipe_comment(recipe) else "Edit comment"
+                        if st.button(comment_label, key=f"comment_recipe_{recipe['id']}"):
+                            _open_comment_dialog(recipe)
+                    with action_row[2]:
                         if st.button("Rate favorite", key=f"rate_recipe_{recipe['id']}"):
                             _open_rate_dialog(recipe)
-                    with delete_col:
+                    with action_row[3]:
                         if st.button("Delete favorite", key=f"delete_recipe_{recipe['id']}"):
                             _open_delete_dialog(recipe)
                 with rating_col:
                     st.markdown(render_star_rating(recipe.get("rating")), unsafe_allow_html=True)
                     st.caption("Rating")
+                    if has_recipe_comment(recipe):
+                        if st.button("💬 View note", key=f"view_comment_{recipe['id']}", help="Open the kitchen note for this recipe"):
+                            _open_comment_dialog(recipe)
+                    else:
+                        st.caption("No note yet")
 
+        if st.session_state.get("show_edit_favorite_dialog"):
+            edit_favorite_dialog()
+        if st.session_state.get("show_comment_dialog"):
+            recipe_comment_dialog()
         if st.session_state.get("show_rate_dialog"):
             rate_favorite_dialog()
         if st.session_state.get("show_delete_dialog"):

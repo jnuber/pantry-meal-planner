@@ -16,6 +16,7 @@ create table if not exists saved_recipes (
     ingredients text,
     instructions text,
     rating smallint,
+    comment text,
     created_at timestamptz default now(),
     constraint saved_recipes_rating_check check (rating is null or (rating >= 1 and rating <= 5))
 );
@@ -45,3 +46,5 @@ alter table saved_recipes drop constraint if exists saved_recipes_rating_check;
 alter table saved_recipes
     add constraint saved_recipes_rating_check
     check (rating is null or (rating >= 1 and rating <= 5));
+
+alter table saved_recipes add column if not exists comment text;
