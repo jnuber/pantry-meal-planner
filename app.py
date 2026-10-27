@@ -60,6 +60,15 @@ METRIC_UNITS = COUNT_UNITS + [
     "kg",
 ]
 
+PANTRY_CATEGORIES = [
+    "Produce",
+    "Meat & Seafood",
+    "Dairy & Refrigerated",
+    "Pantry Staples",
+    "Spices",
+    "Frozen",
+]
+
 UNIT_ALIASES = {
     "teaspoon": "tsp",
     "teaspoons": "tsp",
@@ -375,6 +384,41 @@ def delete_inventory_item(name):
     supabase.table("pantry_inventory").delete().eq("ingredient_name", name).execute()
 
 
+def _has_item_id(item_id):
+    if item_id is None:
+        return False
+    try:
+        if pd.isna(item_id):
+            return False
+    except (TypeError, ValueError):
+        pass
+    return str(item_id).strip() not in ("", "nan", "None")
+
+
+def update_inventory_item(item_id, original_name, name, category, amount_value, unit_value, unit_system):
+    payload = {
+        "ingredient_name": name,
+        "category": category,
+        "quantity": quantity_value(amount_value),
+        "unit": unit_value,
+        "unit_system": unit_system,
+    }
+
+    def _run(data):
+        query = supabase.table("pantry_inventory").update(data)
+        if _has_item_id(item_id):
+            query = query.eq("id", item_id)
+        else:
+            query = query.eq("ingredient_name", original_name)
+        return query.execute()
+
+    try:
+        _run(payload)
+    except Exception:
+        payload.pop("unit_system", None)
+        _run(payload)
+
+
 def save_favorite_recipe(title, ingredients, instructions):
     supabase.table("saved_recipes").insert(
         {
@@ -420,7 +464,7 @@ Pantry Chef turns what you already have on hand into meal ideas. Work left to ri
 - **Measurement system:** Imperial or Metric is the default for new pantry items. You can still change units on each item.
 
 ### Pantry Inventory
-Add an ingredient name, category, amount, and unit. Choosing **Imperial** or **Metric** on the item switches the unit list (`oz` / `lb` / `cup` versus `g` / `kg` / `ml`). Adding an existing name updates that item. Use the table and **Delete Selected Item** to remove something you used up.
+Add an ingredient name, category, amount, and unit. Choosing **Imperial** or **Metric** on the item switches the unit list (`oz` / `lb` / `cup` versus `g` / `kg` / `ml`). Click a row in **Items on Hand** to edit any field except the row number, then save. Adding an existing name also updates that item. Use **Delete Selected Item** to remove something you used up.
 
 ### Recipe Generator
 Pick which pantry items to cook with, add an optional craving (such as “quick 20-minute dinner”), then generate ideas. The chef usually returns **two** recipes.
@@ -484,6 +528,74 @@ st.markdown(
 @st.dialog("Kitchen Help", width="large")
 def show_help_dialog():
     st.markdown(HELP_GUIDE)
+
+
+def _close_edit_dialog():
+    st.session_state.show_edit_dialog = False
+
+
+def _open_edit_dialog(item):
+    st.session_state.edit_item = dict(item)
+    st.session_state.edit_pantry_name = str(item.get("item") or "")
+    st.session_state.edit_pantry_category = item.get("category") if item.get("category") in PANTRY_CATEGORIES else PANTRY_CATEGORIES[0]
+    system = item.get("system") or item.get("unit_system") or detect_unit_system(item.get("unit"))
+    if system not in ("Imperial", "Metric"):
+        system = "Imperial"
+    st.session_state.edit_pantry_system = system
+    amount = item.get("amount")
+    if amount is None or (isinstance(amount, float) and pd.isna(amount)):
+        amount, _, _ = parse_quantity(item.get("quantity"))
+    st.session_state.edit_pantry_amount = str(amount).strip()
+    unit = normalize_unit(item.get("unit") or "")
+    choices = units_for_system(system)
+    st.session_state.edit_pantry_unit = unit if unit in choices else choices[0]
+    st.session_state.show_edit_dialog = True
+
+
+@st.dialog("Edit pantry item", width="small", on_dismiss=_close_edit_dialog)
+def edit_inventory_dialog():
+    item = st.session_state.get("edit_item") or {}
+    original_name = str(item.get("item") or "")
+    st.caption("Update any field except the table index, then save.")
+    name = st.text_input("Ingredient Name:", key="edit_pantry_name")
+    category = st.selectbox("Category:", PANTRY_CATEGORIES, key="edit_pantry_category")
+    unit_system = st.radio("Unit system:", ["Imperial", "Metric"], horizontal=True, key="edit_pantry_system")
+    amount_col, unit_col = st.columns(2)
+    with amount_col:
+        amount = st.text_input("Amount:", key="edit_pantry_amount")
+    with unit_col:
+        unit_choices = units_for_system(unit_system)
+        current_unit = st.session_state.get("edit_pantry_unit")
+        if current_unit not in unit_choices:
+            st.session_state.edit_pantry_unit = unit_choices[0]
+        unit = st.selectbox("Unit:", unit_choices, key="edit_pantry_unit")
+
+    save_col, cancel_col = st.columns(2)
+    with save_col:
+        if st.button("Save changes", type="primary"):
+            cleaned_name = (name or "").strip().title()
+            if not cleaned_name:
+                st.warning("Ingredient name is required.")
+            else:
+                try:
+                    update_inventory_item(
+                        item.get("id"),
+                        original_name,
+                        cleaned_name,
+                        category,
+                        (amount or "").strip() or "1",
+                        normalize_unit(unit),
+                        unit_system,
+                    )
+                    st.session_state.show_edit_dialog = False
+                    st.success(f"Updated '{cleaned_name}'.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Could not update item: {e}")
+    with cancel_col:
+        if st.button("Cancel"):
+            st.session_state.show_edit_dialog = False
+            st.rerun()
 
 
 title_col, help_col = st.columns([0.9, 0.1], vertical_alignment="center")
@@ -628,7 +740,7 @@ with tab1:
             new_item = st.text_input("Ingredient Name (e.g., Chicken Breast, Rice, Eggs):")
             category = st.selectbox(
                 "Category:",
-                ["Produce", "Meat & Seafood", "Dairy & Refrigerated", "Pantry Staples", "Spices", "Frozen"],
+                PANTRY_CATEGORIES,
             )
             amount_col, unit_col = st.columns(2)
             with amount_col:
@@ -677,19 +789,52 @@ with tab1:
                 axis=1,
             )
             display["system"] = display["unit_system"].fillna("").replace("", "Imperial")
-            st.dataframe(
+            table = st.dataframe(
                 display[["item", "category", "amount", "unit", "system"]],
                 width="stretch",
+                hide_index=True,
+                on_select="rerun",
+                selection_mode="single-row",
+                key="pantry_table",
             )
+            st.caption("Click a row to edit that item. The row number is not editable.")
 
-            delete_id = st.selectbox("Select item to remove:", df["item"].tolist())
-            if st.button("Delete Selected Item"):
-                try:
-                    delete_inventory_item(delete_id)
-                    st.warning(f"Removed '{delete_id}'.")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Could not remove item: {e}")
+            selected_rows = []
+            selection = getattr(table, "selection", None)
+            if isinstance(selection, dict):
+                selected_rows = list(selection.get("rows") or [])
+            elif selection is not None:
+                selected_rows = list(getattr(selection, "rows", []) or [])
+
+            if selected_rows:
+                selected_item = display.iloc[int(selected_rows[0])].to_dict()
+                selection_token = f"{selected_rows[0]}:{selected_item.get('id')}:{selected_item.get('item')}"
+                if st.session_state.get("pantry_selection_token") != selection_token:
+                    st.session_state.pantry_selection_token = selection_token
+                    _open_edit_dialog(selected_item)
+
+            selected_name = st.selectbox(
+                "Selected item:",
+                df["item"].tolist(),
+                key="pantry_selected_name",
+            )
+            edit_col, delete_col = st.columns(2)
+            with edit_col:
+                if st.button("Edit selected item"):
+                    match = display[display["item"] == selected_name]
+                    if not match.empty:
+                        _open_edit_dialog(match.iloc[0].to_dict())
+            with delete_col:
+                if st.button("Delete selected item"):
+                    try:
+                        delete_inventory_item(selected_name)
+                        st.warning(f"Removed '{selected_name}'.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Could not remove item: {e}")
+
+            if st.session_state.get("show_edit_dialog"):
+                edit_inventory_dialog()
         else:
             st.info("Your pantry is currently empty. Add some items on the left!")
 
