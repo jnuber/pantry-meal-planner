@@ -429,6 +429,45 @@ def save_favorite_recipe(title, ingredients, instructions):
     ).execute()
 
 
+def _parse_rating(value):
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    try:
+        rating = int(value)
+    except (TypeError, ValueError):
+        return None
+    if 1 <= rating <= 5:
+        return rating
+    return None
+
+
+def format_star_rating(rating):
+    parsed = _parse_rating(rating) or 0
+    return ("★" * parsed) + ("☆" * (5 - parsed))
+
+
+def render_star_rating(rating, size="1.7rem"):
+    parsed = _parse_rating(rating) or 0
+    stars = []
+    for index in range(1, 6):
+        filled = index <= parsed
+        glyph = "★" if filled else "☆"
+        color = "#e0b000" if filled else "#c5b8a8"
+        stars.append(
+            f"<span style='color:{color};font-size:{size};line-height:1;'>{glyph}</span>"
+        )
+    return (
+        "<div style='text-align:center;letter-spacing:0.12rem;white-space:nowrap;'>"
+        + "".join(stars)
+        + "</div>"
+    )
+
+
 def fetch_saved_recipes_df():
     response = (
         supabase.table("saved_recipes")
@@ -445,13 +484,28 @@ def fetch_saved_recipes_df():
                 "ingredients": row.get("ingredients") or "",
                 "instructions": row.get("instructions") or "",
                 "date_saved": row.get("date_saved") or row.get("created_at") or "",
+                "rating": _parse_rating(row.get("rating")),
             }
         )
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+    return df.sort_values(
+        by=["rating", "date_saved"],
+        ascending=[False, False],
+        na_position="last",
+    )
 
 
 def delete_saved_recipe(recipe_id):
     supabase.table("saved_recipes").delete().eq("id", recipe_id).execute()
+
+
+def update_recipe_rating(recipe_id, rating):
+    parsed = _parse_rating(rating)
+    if parsed is None:
+        raise ValueError("Rating must be between 1 and 5 stars.")
+    supabase.table("saved_recipes").update({"rating": parsed}).eq("id", recipe_id).execute()
 
 
 HELP_GUIDE = """
@@ -472,7 +526,7 @@ Pick which pantry items to cook with, add an optional craving (such as “quick 
 Each recipe has its own card. Check the ones you want, then **Save selected**. **Save all separately** stores every suggestion as its own Household Favorite. Uncheck a card if you only want the other one.
 
 ### Saved Recipes
-Favorites are stored in Supabase, one entry per recipe. Open a card to reread it, and delete any you no longer want.
+Favorites are stored in Supabase, one entry per recipe. Open a card to reread it. **Rate favorite** opens a 5-star dialog. **Delete favorite** removes it after you confirm.
 
 ### Tips
 - Be specific in the extra prompt (“air fryer, high protein”) so the chef stays inside your appliances and diet.
@@ -595,6 +649,75 @@ def edit_inventory_dialog():
     with cancel_col:
         if st.button("Cancel"):
             st.session_state.show_edit_dialog = False
+            st.rerun()
+
+
+def _close_rate_dialog():
+    st.session_state.show_rate_dialog = False
+
+
+def _close_delete_dialog():
+    st.session_state.show_delete_dialog = False
+
+
+def _open_rate_dialog(recipe):
+    st.session_state.rating_recipe = dict(recipe)
+    st.session_state.pop("favorite_star_feedback", None)
+    st.session_state.show_rate_dialog = True
+
+
+def _open_delete_dialog(recipe):
+    st.session_state.delete_recipe = dict(recipe)
+    st.session_state.show_delete_dialog = True
+
+
+@st.dialog("Rate this favorite", width="small", on_dismiss=_close_rate_dialog)
+def rate_favorite_dialog():
+    recipe = st.session_state.get("rating_recipe") or {}
+    title = recipe.get("title") or "this recipe"
+    current = _parse_rating(recipe.get("rating"))
+    st.write(f"How did **{title}** turn out?")
+    if current:
+        st.caption(f"Current rating: {format_star_rating(current)}")
+    else:
+        st.caption("Not rated yet. Choose 1 to 5 stars.")
+    stars = st.feedback(
+        "stars",
+        key="favorite_star_feedback",
+        default=(current - 1) if current else None,
+    )
+    if st.button("Save rating", type="primary"):
+        if stars is None:
+            st.warning("Choose a star rating first.")
+        else:
+            try:
+                update_recipe_rating(recipe.get("id"), int(stars) + 1)
+                st.session_state.show_rate_dialog = False
+                st.rerun()
+            except Exception as e:
+                st.error(f"Could not save rating: {e}")
+    if st.button("Cancel"):
+        st.session_state.show_rate_dialog = False
+        st.rerun()
+
+
+@st.dialog("Delete favorite?", width="small", on_dismiss=_close_delete_dialog)
+def confirm_delete_favorite_dialog():
+    recipe = st.session_state.get("delete_recipe") or {}
+    title = recipe.get("title") or "this recipe"
+    st.write(f"Remove **{title}** from household favorites? This cannot be undone.")
+    delete_col, keep_col = st.columns(2)
+    with delete_col:
+        if st.button("Delete favorite", type="primary"):
+            try:
+                delete_saved_recipe(recipe.get("id"))
+                st.session_state.show_delete_dialog = False
+                st.rerun()
+            except Exception as e:
+                st.error(f"Could not delete favorite: {e}")
+    with keep_col:
+        if st.button("Keep it"):
+            st.session_state.show_delete_dialog = False
             st.rerun()
 
 
@@ -1002,13 +1125,26 @@ with tab3:
         st.caption("No saved recipes yet. Generate a recipe, then click Save to Household Favorites.")
     else:
         for _, row in df_recipes.iterrows():
-            with st.expander(f"{row['title']}  ·  {row['date_saved']}"):
-                if row["ingredients"]:
-                    st.caption(f"Pantry ingredients used: {row['ingredients']}")
-                st.markdown(row["instructions"])
-                if st.button("Delete recipe", key=f"delete_recipe_{row['id']}"):
-                    try:
-                        delete_saved_recipe(row["id"])
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Could not delete recipe: {e}")
+            recipe = row.to_dict()
+            heading = f"{recipe['title']}  ·  {format_star_rating(recipe.get('rating'))}  ·  {recipe['date_saved']}"
+            with st.expander(heading):
+                recipe_col, rating_col = st.columns([0.82, 0.18], vertical_alignment="top")
+                with recipe_col:
+                    if recipe.get("ingredients"):
+                        st.caption(f"Pantry ingredients used: {recipe['ingredients']}")
+                    st.markdown(recipe["instructions"])
+                    rate_col, delete_col = st.columns(2)
+                    with rate_col:
+                        if st.button("Rate favorite", key=f"rate_recipe_{recipe['id']}"):
+                            _open_rate_dialog(recipe)
+                    with delete_col:
+                        if st.button("Delete favorite", key=f"delete_recipe_{recipe['id']}"):
+                            _open_delete_dialog(recipe)
+                with rating_col:
+                    st.markdown(render_star_rating(recipe.get("rating")), unsafe_allow_html=True)
+                    st.caption("Rating")
+
+        if st.session_state.get("show_rate_dialog"):
+            rate_favorite_dialog()
+        if st.session_state.get("show_delete_dialog"):
+            confirm_delete_favorite_dialog()

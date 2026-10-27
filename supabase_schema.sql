@@ -15,7 +15,9 @@ create table if not exists saved_recipes (
     title text,
     ingredients text,
     instructions text,
-    created_at timestamptz default now()
+    rating smallint,
+    created_at timestamptz default now(),
+    constraint saved_recipes_rating_check check (rating is null or (rating >= 1 and rating <= 5))
 );
 
 create table if not exists custom_tags (
@@ -36,3 +38,10 @@ create policy "saved_recipes_all" on saved_recipes for all using (true) with che
 
 drop policy if exists "custom_tags_all" on custom_tags;
 create policy "custom_tags_all" on custom_tags for all using (true) with check (true);
+
+-- Existing projects: add favorite ratings if the column is missing.
+alter table saved_recipes add column if not exists rating smallint;
+alter table saved_recipes drop constraint if exists saved_recipes_rating_check;
+alter table saved_recipes
+    add constraint saved_recipes_rating_check
+    check (rating is null or (rating >= 1 and rating <= 5));
