@@ -4,6 +4,7 @@ import streamlit as st
 import pandas as pd
 import requests
 from google import genai
+from google.genai import types
 from supabase import create_client, Client
 
 DEFAULT_APPLIANCES = [
@@ -68,6 +69,25 @@ PANTRY_CATEGORIES = [
     "Spices",
     "Frozen",
 ]
+
+MEAL_TYPES = [
+    "Breakfast",
+    "Brunch",
+    "Lunch",
+    "Dinner",
+    "Snack",
+    "Appetizer",
+    "Side dish",
+    "Soup / stew",
+    "Salad",
+    "Dessert",
+    "Meal prep",
+]
+
+# Keep generated JSON short so Gemini / Ollama finish faster.
+RECIPE_MAX_OUTPUT_TOKENS = 2048
+RECIPE_SUGGESTION_COUNT = 2
+RECIPE_MAX_STEPS = 8
 
 UNIT_ALIASES = {
     "teaspoon": "tsp",
@@ -231,6 +251,65 @@ def parse_generated_recipes(raw_text):
     except (json.JSONDecodeError, TypeError, ValueError):
         pass
     return split_markdown_recipes(text)
+
+
+def build_recipe_prompt(meal_type, pantry_items, appliances, dietary_restrictions, servings, additional_notes):
+    notes = (additional_notes or "").strip() or "None"
+    appliance_text = ", ".join(appliances) or "Stovetop"
+    diet_text = ", ".join(dietary_restrictions) or "None"
+    pantry_text = ", ".join(pantry_items)
+    return f"""Write {RECIPE_SUGGESTION_COUNT} short {meal_type} recipes from this pantry.
+
+Meal type: {meal_type}
+Pantry (prefer these; amounts shown): {pantry_text}
+Appliances: {appliance_text}
+Diet: {diet_text}
+Servings: {servings}
+Extra: {notes}
+
+Rules:
+- JSON array only. No markdown, no intro, no trailing notes.
+- Each object: title, prep_time, cook_time, ingredients (string[]), instructions (string[]).
+- Use pantry items plus oil, salt, pepper, water if needed. Mark pantry vs staple.
+- At most {RECIPE_MAX_STEPS} instruction steps. Each step is one short sentence.
+- Keep titles under 8 words.
+"""
+
+
+def generate_recipe_text(ai_provider, prompt, gemini_key, ollama_model):
+    if ai_provider == "Google Gemini API":
+        if not gemini_key:
+            raise ValueError("Please provide a Gemini API Key in the sidebar.")
+        client = genai.Client(api_key=gemini_key)
+        response = client.models.generate_content(
+            model="gemini-3.8-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                max_output_tokens=RECIPE_MAX_OUTPUT_TOKENS,
+                response_mime_type="application/json",
+                thinking_config=types.ThinkingConfig(
+                    thinking_level=types.ThinkingLevel.LOW,
+                ),
+            ),
+        )
+        return (response.text or "").strip()
+
+    res = requests.post(
+        "http://localhost:11434/api/generate",
+        json={
+            "model": ollama_model,
+            "prompt": prompt,
+            "stream": False,
+            "format": "json",
+            "options": {
+                "num_predict": RECIPE_MAX_OUTPUT_TOKENS,
+            },
+        },
+        timeout=180,
+    )
+    if res.status_code != 200:
+        raise RuntimeError(f"Ollama error: {res.text}")
+    return (res.json().get("response") or "").strip()
 
 
 DEFAULT_DIETARY = [
@@ -565,7 +644,7 @@ Pantry Chef turns what you already have on hand into meal ideas. Work left to ri
 Add an ingredient name, category, amount, and unit. Choosing **Imperial** or **Metric** on the item switches the unit list (`oz` / `lb` / `cup` versus `g` / `kg` / `ml`). Click a row in **Items on Hand** to edit any field except the row number, then save. Adding an existing name also updates that item. Use **Delete Selected Item** to remove something you used up.
 
 ### Recipe Generator
-Pick which pantry items to cook with, add an optional craving (such as “quick 20-minute dinner”), then generate ideas. The chef usually returns **two** recipes.
+Choose a **meal type** (Dinner, Breakfast, Soup, or type your own). Then pick pantry items to cook with — nothing is pre-selected. Add an optional craving, then generate ideas. The chef looks for that meal type using what you chose and usually returns **two short** recipes (capped length so it stays quick).
 
 Each recipe has its own card. Check the ones you want, then **Save selected**. **Save all separately** stores every suggestion as its own Household Favorite. Uncheck a card if you only want the other one.
 
@@ -1111,58 +1190,49 @@ with tab2:
             qty = format_quantity(row["amount"], row["unit"]) or row["quantity"] or ""
             pantry_qty_by_item[row["item"]] = f"{row['item']} ({qty})" if qty else row["item"]
 
+    meal_type = st.selectbox(
+        "Meal type:",
+        MEAL_TYPES,
+        index=None,
+        placeholder="Choose or type a meal type",
+        accept_new_options=True,
+        help="The chef will look for this kind of meal. Type if you need something not on the list.",
+        key="recipe_meal_type",
+    )
     selected_pantry = st.multiselect(
-        "Select ingredients to use for this meal:", pantry_list, default=pantry_list
+        "Select ingredients to use for this meal:",
+        pantry_list,
+        default=[],
+        placeholder="Choose pantry items (none selected)",
+        help="Starts empty so you pick only what you want in this meal.",
+        key="recipe_selected_pantry",
     )
     additional_notes = st.text_input(
-        "Extra craving or prompt (e.g., 'Quick 20-min dinner', 'Comfort food', 'Italian style'):"
+        "Extra craving or prompt (e.g., 'Quick 20-min', 'Comfort food', 'Italian style'):"
     )
 
     if st.button("✨ Generate Recipe Ideas", type="primary"):
-        if not selected_pantry:
+        if not meal_type:
+            st.error("Please choose or type a meal type.")
+        elif not selected_pantry:
             st.error("Please select at least a few pantry ingredients!")
         else:
-            prompt = f"""
-You are a expert chef and automated meal planner.
-Given these ingredients: {', '.join(pantry_qty_by_item.get(item, item) for item in selected_pantry)}
-Appliances available: {', '.join(appliances)}
-Dietary restrictions: {', '.join(dietary_restrictions)}
-Servings: {servings}
-Additional Request: {additional_notes}
-
-Generate 2 distinct recipe suggestions.
-Return ONLY valid JSON (no markdown fences) as an array of objects with keys:
-title, prep_time, cook_time, ingredients (array of strings), instructions (array of step strings).
-In ingredients, note which items came from the pantry list versus staples like oil/salt.
-"""
+            pantry_for_prompt = [
+                pantry_qty_by_item.get(item, item) for item in selected_pantry
+            ]
+            prompt = build_recipe_prompt(
+                meal_type,
+                pantry_for_prompt,
+                appliances,
+                dietary_restrictions,
+                servings,
+                additional_notes,
+            )
             with st.spinner("Chef AI is creating recipes..."):
-                recipe_result = ""
                 try:
-                    if ai_provider == "Google Gemini API":
-                        if not gemini_key:
-                            st.error("Please provide a Gemini API Key in the sidebar.")
-                        else:
-                            client = genai.Client(api_key=gemini_key)
-                            response = client.models.generate_content(
-                                model="gemini-3.8-flash",
-                                contents=prompt,
-                            )
-                            recipe_result = response.text
-                    else:
-                        res = requests.post(
-                            "http://localhost:11434/api/generate",
-                            json={
-                                "model": ollama_model,
-                                "prompt": prompt,
-                                "stream": False,
-                            },
-                            timeout=180,
-                        )
-                        if res.status_code == 200:
-                            recipe_result = res.json().get("response", "")
-                        else:
-                            st.error(f"Ollama error: {res.text}")
-
+                    recipe_result = generate_recipe_text(
+                        ai_provider, prompt, gemini_key, ollama_model
+                    )
                     if recipe_result:
                         recipes = parse_generated_recipes(recipe_result)
                         st.session_state["last_recipe"] = recipe_result
@@ -1171,7 +1241,8 @@ In ingredients, note which items came from the pantry list versus staples like o
                         for key in list(st.session_state.keys()):
                             if str(key).startswith("save_pick_"):
                                 del st.session_state[key]
-
+                    else:
+                        st.error("The chef returned an empty recipe. Try again.")
                 except Exception as e:
                     st.error(f"Error generating recipe: {str(e)}")
 
