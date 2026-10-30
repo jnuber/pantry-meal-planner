@@ -970,7 +970,7 @@ Choose a **meal type** (Dinner, Breakfast, Soup, or type your own). Then pick pa
 Each recipe has its own card. Check the ones you want, then **Save selected**. **Save all separately** stores every suggestion as its own Household Favorite. Uncheck a card if you only want the other one. **Download pretty PDF** saves a print-ready kitchen copy of every generated recipe.
 
 ### Saved Recipes
-Favorites are stored in Supabase, one entry per recipe. Sort the list by **name** or **rating**, then choose **ascending** or **descending**. Open a card to reread it. **Edit recipe** changes the title, pantry line, or instructions. **Add comment** / the 💬 note badge opens a kitchen note. **Rate favorite** opens a 5-star dialog. **Delete favorite** removes it after you confirm. **PDF** on a card, or **Download all pretty PDF**, saves the same print-ready kitchen copy as the Recipe Generator.
+Favorites are stored in Supabase, one entry per recipe. Sort the list by **name** or **rating**, then choose **ascending** or **descending**. Open a card to reread it. **Edit recipe** changes the title, pantry line, or instructions. **Add comment** / the 💬 note badge opens a kitchen note. **Rate favorite** opens a 5-star dialog. **Delete favorite** removes it after you confirm. **PDF** on a card saves the same print-ready kitchen copy as the Recipe Generator.
 
 ### Tips
 - Be specific in the extra prompt (“air fryer, high protein”) so the chef stays inside your appliances and diet.
@@ -1720,18 +1720,6 @@ with tab3:
                 key="favorite_sort_order",
             )
         df_recipes = sort_saved_recipes(df_recipes, sort_by, sort_order)
-        favorite_pdf_recipes = [favorite_for_pdf(row.to_dict()) for _, row in df_recipes.iterrows()]
-        try:
-            st.download_button(
-                "📥 Download all pretty PDF",
-                data=build_recipes_pdf(favorite_pdf_recipes),
-                file_name="household-favorites.pdf",
-                mime="application/pdf",
-                help="Print-ready kitchen cards for every saved favorite, one recipe per page.",
-                key="download_all_favorites_pdf",
-            )
-        except Exception as e:
-            st.error(f"Could not build the favorites PDF: {e}")
         for _, row in df_recipes.iterrows():
             recipe = row.to_dict()
             note_mark = "  ·  💬" if has_recipe_comment(recipe) else ""
