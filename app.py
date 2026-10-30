@@ -248,8 +248,30 @@ def recipe_to_html(recipe):
     )
 
 
+_APP_DIR = Path(__file__).resolve().parent
+_PDF_ASCII = str.maketrans(
+    {
+        "•": "-",
+        "·": "-",
+        "—": "-",
+        "–": "-",
+        "’": "'",
+        "‘": "'",
+        "“": '"',
+        "”": '"',
+        "…": "...",
+        "½": "1/2",
+        "¼": "1/4",
+        "¾": "3/4",
+        "°": " deg",
+    }
+)
+
+
 def _kitchen_fonts():
+    bundled = _APP_DIR / "fonts"
     candidates = [
+        (bundled / "DejaVuSans.ttf", bundled / "DejaVuSans-Bold.ttf"),
         (
             Path("/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf"),
             Path("/usr/share/fonts/dejavu-sans-fonts/DejaVuSans-Bold.ttf"),
@@ -265,6 +287,13 @@ def _kitchen_fonts():
     return None, None
 
 
+def _pdf_text(text, unicode_ok=True):
+    value = str(text or "")
+    if unicode_ok:
+        return value
+    return value.translate(_PDF_ASCII).encode("latin-1", "replace").decode("latin-1")
+
+
 def _plain_from_markdown(text):
     lines = []
     for line in (text or "").splitlines():
@@ -275,9 +304,10 @@ def _plain_from_markdown(text):
 
 
 class KitchenRecipePDF(FPDF):
-    def __init__(self, font_family):
+    def __init__(self, font_family, unicode_ok=True):
         super().__init__(format="Letter")
         self.font_family_name = font_family
+        self.unicode_ok = unicode_ok
         self.set_auto_page_break(auto=True, margin=22)
         self.set_margins(18, 26, 18)
 
@@ -289,7 +319,7 @@ class KitchenRecipePDF(FPDF):
         self.set_text_color(255, 255, 255)
         self.set_font(self.font_family_name, "B", 11)
         self.set_xy(18, 4.5)
-        self.cell(0, 7, "Pantry Chef  ·  Household kitchen copy")
+        self.cell(0, 7, _pdf_text("Pantry Chef  ·  Household kitchen copy", self.unicode_ok))
         self.set_fill_color(232, 214, 196)
         self.rect(0, 16, self.w, 1.2, "F")
         self.set_y(24)
@@ -302,7 +332,12 @@ class KitchenRecipePDF(FPDF):
         self.line(18, self.get_y(), self.w - 18, self.get_y())
         self.set_font(self.font_family_name, "", 8)
         self.set_text_color(138, 112, 96)
-        self.cell(0, 10, f"Pretty-print recipe card   ·   Page {self.page_no()}", align="C")
+        self.cell(
+            0,
+            10,
+            _pdf_text(f"Pretty-print recipe card   ·   Page {self.page_no()}", self.unicode_ok),
+            align="C",
+        )
 
 
 def _write_pdf_section_label(pdf, label):
@@ -321,18 +356,20 @@ def _write_pdf_section_label(pdf, label):
 
 def build_recipes_pdf(recipes):
     regular, bold = _kitchen_fonts()
-    family = "Kitchen" if regular else "Helvetica"
-    pdf = KitchenRecipePDF(family)
-    if regular:
+    unicode_ok = bool(regular)
+    family = "Kitchen" if unicode_ok else "Helvetica"
+    pdf = KitchenRecipePDF(family, unicode_ok=unicode_ok)
+    if unicode_ok:
         pdf.add_font(family, "", regular)
         pdf.add_font(family, "B", bold)
+    bullet = "•" if unicode_ok else "-"
 
     for recipe in recipes or []:
         pdf.add_page()
         parts = recipe_parts(recipe)
         pdf.set_text_color(61, 43, 31)
         pdf.set_font(family, "B", 20)
-        pdf.multi_cell(0, 9, parts["title"])
+        pdf.multi_cell(0, 9, _pdf_text(parts["title"], unicode_ok))
         pdf.ln(1)
         meta = []
         if parts["prep"]:
@@ -342,7 +379,7 @@ def build_recipes_pdf(recipes):
         if meta:
             pdf.set_font(family, "B", 11)
             pdf.set_text_color(196, 92, 38)
-            pdf.multi_cell(0, 7, "  ·  ".join(meta))
+            pdf.multi_cell(0, 7, _pdf_text("  ·  ".join(meta), unicode_ok))
             pdf.set_text_color(61, 43, 31)
 
         if parts["ingredients"]:
@@ -352,10 +389,10 @@ def build_recipes_pdf(recipes):
                 pdf.set_x(start_x)
                 pdf.set_font(family, "B", 11)
                 pdf.set_text_color(196, 92, 38)
-                pdf.cell(6, 6, "•")
+                pdf.cell(6, 6, _pdf_text(bullet, unicode_ok))
                 pdf.set_font(family, "", 11)
                 pdf.set_text_color(61, 43, 31)
-                pdf.multi_cell(0, 6, item)
+                pdf.multi_cell(0, 6, _pdf_text(item, unicode_ok))
                 pdf.ln(1)
 
         if parts["instructions"]:
@@ -366,12 +403,12 @@ def build_recipes_pdf(recipes):
                 pdf.cell(10, 6, f"{index}.")
                 pdf.set_font(family, "", 11)
                 pdf.set_text_color(61, 43, 31)
-                pdf.multi_cell(0, 6, step)
+                pdf.multi_cell(0, 6, _pdf_text(step, unicode_ok))
                 pdf.ln(2)
 
         if not parts["ingredients"] and not parts["instructions"] and parts["markdown"]:
             _write_pdf_section_label(pdf, "Recipe")
-            pdf.multi_cell(0, 6, _plain_from_markdown(parts["markdown"]))
+            pdf.multi_cell(0, 6, _pdf_text(_plain_from_markdown(parts["markdown"]), unicode_ok))
 
     return bytes(pdf.output())
 
