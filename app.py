@@ -1,8 +1,12 @@
+import html
 import json
 import re
+from pathlib import Path
+
 import streamlit as st
 import pandas as pd
 import requests
+from fpdf import FPDF
 from google import genai
 from google.genai import types
 from supabase import create_client, Client
@@ -188,6 +192,195 @@ def recipe_to_markdown(recipe):
         else:
             lines.extend(f"{index}. {step}" for index, step in enumerate(instructions, 1))
     return "\n\n".join(lines)
+
+
+def _as_text_list(value):
+    if value is None:
+        return []
+    if isinstance(value, list):
+        items = []
+        for item in value:
+            text = " ".join(str(item or "").split())
+            if text:
+                items.append(text)
+        return items
+    text = str(value).strip()
+    if not text:
+        return []
+    return [" ".join(line.strip(" -•*\t").split()) for line in text.splitlines() if line.strip()]
+
+
+def recipe_parts(recipe):
+    recipe = recipe or {}
+    prep = recipe.get("prep_time") or recipe.get("prepTime") or ""
+    cook = recipe.get("cook_time") or recipe.get("cookTime") or ""
+    return {
+        "title": (recipe.get("title") or "Recipe").strip() or "Recipe",
+        "prep": str(prep).strip(),
+        "cook": str(cook).strip(),
+        "ingredients": _as_text_list(recipe.get("ingredients")),
+        "instructions": _as_text_list(recipe.get("instructions") or recipe.get("steps")),
+        "markdown": (recipe.get("markdown") or "").strip(),
+    }
+
+
+def recipe_to_html(recipe):
+    parts = recipe_parts(recipe)
+    meta = []
+    if parts["prep"]:
+        meta.append(f"Prep {html.escape(parts['prep'])}")
+    if parts["cook"]:
+        meta.append(f"Cook {html.escape(parts['cook'])}")
+    meta_html = f'<p class="recipe-meta">{" · ".join(meta)}</p>' if meta else ""
+    columns = []
+    if parts["ingredients"]:
+        items = "".join(f"<li>{html.escape(item)}</li>" for item in parts["ingredients"])
+        columns.append(f'<div class="recipe-col"><h3>Ingredients</h3><ul>{items}</ul></div>')
+    if parts["instructions"]:
+        steps = "".join(f"<li>{html.escape(step)}</li>" for step in parts["instructions"])
+        columns.append(f'<div class="recipe-col"><h3>Method</h3><ol>{steps}</ol></div>')
+    grid = f'<div class="recipe-grid">{"".join(columns)}</div>' if columns else ""
+    return (
+        f'<article class="recipe-sheet">'
+        f'<h2>{html.escape(parts["title"])}</h2>'
+        f"{meta_html}{grid}"
+        f"</article>"
+    )
+
+
+def _kitchen_fonts():
+    candidates = [
+        (
+            Path("/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf"),
+            Path("/usr/share/fonts/dejavu-sans-fonts/DejaVuSans-Bold.ttf"),
+        ),
+        (
+            Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+            Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+        ),
+    ]
+    for regular, bold in candidates:
+        if regular.is_file() and bold.is_file():
+            return str(regular), str(bold)
+    return None, None
+
+
+def _plain_from_markdown(text):
+    lines = []
+    for line in (text or "").splitlines():
+        stripped = re.sub(r"^#{1,6}\s*", "", line.strip())
+        stripped = stripped.replace("**", "")
+        lines.append(stripped)
+    return "\n".join(lines).strip()
+
+
+class KitchenRecipePDF(FPDF):
+    def __init__(self, font_family):
+        super().__init__(format="Letter")
+        self.font_family_name = font_family
+        self.set_auto_page_break(auto=True, margin=22)
+        self.set_margins(18, 26, 18)
+
+    def header(self):
+        self.set_fill_color(255, 250, 243)
+        self.rect(0, 0, self.w, self.h, "F")
+        self.set_fill_color(196, 92, 38)
+        self.rect(0, 0, self.w, 16, "F")
+        self.set_text_color(255, 255, 255)
+        self.set_font(self.font_family_name, "B", 11)
+        self.set_xy(18, 4.5)
+        self.cell(0, 7, "Pantry Chef  ·  Household kitchen copy")
+        self.set_fill_color(232, 214, 196)
+        self.rect(0, 16, self.w, 1.2, "F")
+        self.set_y(24)
+        self.set_text_color(61, 43, 31)
+
+    def footer(self):
+        self.set_y(-16)
+        self.set_draw_color(232, 214, 196)
+        self.set_line_width(0.4)
+        self.line(18, self.get_y(), self.w - 18, self.get_y())
+        self.set_font(self.font_family_name, "", 8)
+        self.set_text_color(138, 112, 96)
+        self.cell(0, 10, f"Pretty-print recipe card   ·   Page {self.page_no()}", align="C")
+
+
+def _write_pdf_section_label(pdf, label):
+    pdf.ln(4)
+    pdf.set_font(pdf.font_family_name, "B", 10)
+    pdf.set_text_color(196, 92, 38)
+    pdf.cell(0, 6, label.upper())
+    pdf.ln(2)
+    y = pdf.get_y()
+    pdf.set_draw_color(232, 214, 196)
+    pdf.line(pdf.l_margin, y, pdf.w - pdf.r_margin, y)
+    pdf.ln(4)
+    pdf.set_text_color(61, 43, 31)
+    pdf.set_font(pdf.font_family_name, "", 11)
+
+
+def build_recipes_pdf(recipes):
+    regular, bold = _kitchen_fonts()
+    family = "Kitchen" if regular else "Helvetica"
+    pdf = KitchenRecipePDF(family)
+    if regular:
+        pdf.add_font(family, "", regular)
+        pdf.add_font(family, "B", bold)
+
+    for recipe in recipes or []:
+        pdf.add_page()
+        parts = recipe_parts(recipe)
+        pdf.set_text_color(61, 43, 31)
+        pdf.set_font(family, "B", 20)
+        pdf.multi_cell(0, 9, parts["title"])
+        pdf.ln(1)
+        meta = []
+        if parts["prep"]:
+            meta.append(f"Prep {parts['prep']}")
+        if parts["cook"]:
+            meta.append(f"Cook {parts['cook']}")
+        if meta:
+            pdf.set_font(family, "B", 11)
+            pdf.set_text_color(196, 92, 38)
+            pdf.multi_cell(0, 7, "  ·  ".join(meta))
+            pdf.set_text_color(61, 43, 31)
+
+        if parts["ingredients"]:
+            _write_pdf_section_label(pdf, "Ingredients")
+            for item in parts["ingredients"]:
+                start_x = pdf.l_margin
+                pdf.set_x(start_x)
+                pdf.set_font(family, "B", 11)
+                pdf.set_text_color(196, 92, 38)
+                pdf.cell(6, 6, "•")
+                pdf.set_font(family, "", 11)
+                pdf.set_text_color(61, 43, 31)
+                pdf.multi_cell(0, 6, item)
+                pdf.ln(1)
+
+        if parts["instructions"]:
+            _write_pdf_section_label(pdf, "Method")
+            for index, step in enumerate(parts["instructions"], 1):
+                pdf.set_font(family, "B", 11)
+                pdf.set_text_color(196, 92, 38)
+                pdf.cell(10, 6, f"{index}.")
+                pdf.set_font(family, "", 11)
+                pdf.set_text_color(61, 43, 31)
+                pdf.multi_cell(0, 6, step)
+                pdf.ln(2)
+
+        if not parts["ingredients"] and not parts["instructions"] and parts["markdown"]:
+            _write_pdf_section_label(pdf, "Recipe")
+            pdf.multi_cell(0, 6, _plain_from_markdown(parts["markdown"]))
+
+    return bytes(pdf.output())
+
+
+def recipes_pdf_filename(recipes):
+    if len(recipes) == 1:
+        slug = re.sub(r"[^a-z0-9]+", "-", (recipes[0].get("title") or "recipe").lower()).strip("-")
+        return f"{(slug or 'recipe')[:48]}.pdf"
+    return "pantry-recipes.pdf"
 
 
 def _title_from_markdown(text, fallback="Generated Recipe"):
@@ -646,7 +839,7 @@ Add an ingredient name, category, amount, and unit. Choosing **Imperial** or **M
 ### Recipe Generator
 Choose a **meal type** (Dinner, Breakfast, Soup, or type your own). Then pick pantry items to cook with — nothing is pre-selected. Add an optional craving, then generate ideas. The chef looks for that meal type using what you chose and usually returns **two short** recipes (capped length so it stays quick).
 
-Each recipe has its own card. Check the ones you want, then **Save selected**. **Save all separately** stores every suggestion as its own Household Favorite. Uncheck a card if you only want the other one.
+Each recipe has its own card. Check the ones you want, then **Save selected**. **Save all separately** stores every suggestion as its own Household Favorite. Uncheck a card if you only want the other one. **Download pretty PDF** saves a print-ready kitchen copy of every generated recipe.
 
 ### Saved Recipes
 Favorites are stored in Supabase, one entry per recipe. Sort the list by **name** or **rating**, then choose **ascending** or **descending**. Open a card to reread it. **Edit recipe** changes the title, pantry line, or instructions. **Add comment** / the 💬 note badge opens a kitchen note. **Rate favorite** opens a 5-star dialog. **Delete favorite** removes it after you confirm.
@@ -695,6 +888,56 @@ st.markdown(
       .st-key-chef_help_corner button span {{
         font-size: 0 !important;
         color: transparent !important;
+      }}
+      .recipe-sheet {{
+        background: #fffaf3;
+        border: 1px solid rgba(61, 43, 31, 0.12);
+        border-radius: 16px;
+        padding: 1.15rem 1.3rem 1.2rem;
+        margin: 0.15rem 0 0.55rem;
+        box-shadow: 0 8px 24px rgba(61, 43, 31, 0.08);
+      }}
+      .recipe-sheet h2 {{
+        font-family: Georgia, "Times New Roman", serif;
+        color: #3d2b1f;
+        margin: 0 0 0.3rem;
+        font-size: 1.42rem;
+        line-height: 1.25;
+      }}
+      .recipe-meta {{
+        color: #c45c26;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+        margin: 0 0 0.85rem;
+      }}
+      .recipe-grid {{
+        display: grid;
+        grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+        gap: 1.05rem 1.4rem;
+      }}
+      .recipe-sheet h3 {{
+        font-size: 0.76rem;
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+        color: #c45c26;
+        margin: 0 0 0.4rem;
+        border-bottom: 1px solid #e8d6c4;
+        padding-bottom: 0.22rem;
+      }}
+      .recipe-sheet ul,
+      .recipe-sheet ol {{
+        margin: 0;
+        padding-left: 1.15rem;
+        color: #3d2b1f;
+      }}
+      .recipe-sheet li {{
+        margin: 0.28rem 0;
+        line-height: 1.45;
+      }}
+      @media (max-width: 720px) {{
+        .recipe-grid {{
+          grid-template-columns: 1fr;
+        }}
       }}
     </style>
     """,
@@ -1257,7 +1500,10 @@ with tab2:
             title = recipe.get("title") or f"Generated Recipe {index + 1}"
             markdown = recipe_to_markdown(recipe)
             with st.expander(title, expanded=True):
-                st.markdown(markdown)
+                parts = recipe_parts(recipe)
+                st.markdown(recipe_to_html(recipe), unsafe_allow_html=True)
+                if not parts["ingredients"] and not parts["instructions"]:
+                    st.markdown(markdown)
                 chosen = st.checkbox(
                     f"Select “{title}” to save",
                     value=True,
@@ -1266,13 +1512,17 @@ with tab2:
             if chosen:
                 selected_to_save.append(recipe)
 
-        combined_markdown = "\n\n---\n\n".join(recipe_to_markdown(recipe) for recipe in generated_recipes)
-        st.download_button(
-            "📥 Download all as Markdown",
-            data=combined_markdown,
-            file_name="recipes.md",
-            mime="text/markdown",
-        )
+        try:
+            pdf_bytes = build_recipes_pdf(generated_recipes)
+            st.download_button(
+                "📥 Download pretty PDF",
+                data=pdf_bytes,
+                file_name=recipes_pdf_filename(generated_recipes),
+                mime="application/pdf",
+                help="Print-ready kitchen cards, one recipe per page.",
+            )
+        except Exception as e:
+            st.error(f"Could not build the PDF: {e}")
 
         save_col, save_all_col = st.columns(2)
         pantry_used = st.session_state.get("last_recipe_ingredients", "")
