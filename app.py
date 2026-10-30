@@ -1017,6 +1017,28 @@ st.markdown(
         font-size: 0 !important;
         color: transparent !important;
       }}
+      h1 {{
+        font-size: 1.45rem !important;
+        line-height: 1.25 !important;
+        margin-bottom: 0.35rem !important;
+      }}
+      @media (max-width: 720px) {{
+        h1 {{
+          font-size: 1.2rem !important;
+        }}
+      }}
+      .st-key-saved_favorites_list [data-testid="stExpander"] summary,
+      .st-key-saved_favorites_list [data-testid="stExpander"] summary p {{
+        font-size: 0.92rem !important;
+        line-height: 1.3 !important;
+        font-weight: 600 !important;
+      }}
+      .st-key-saved_favorites_list h1,
+      .st-key-saved_favorites_list h2 {{
+        font-size: 1.08rem !important;
+        line-height: 1.3 !important;
+        margin: 0.15rem 0 0.4rem !important;
+      }}
       .recipe-sheet {{
         background: #fffaf3;
         border: 1px solid rgba(61, 43, 31, 0.12);
@@ -1304,7 +1326,7 @@ def recipe_comment_dialog():
 
 title_col, help_col = st.columns([0.9, 0.1], vertical_alignment="center")
 with title_col:
-    st.title("🍳 Automated Household Meal Planner & Pantry Recipe Generator")
+    st.title("🍳 Meal Planner & Pantry Recipe Generator")
 with help_col:
     with st.container(key="chef_help_corner", horizontal_alignment="right"):
         if st.button("Help", key="chef_help_btn", help="Open the kitchen help guide"):
@@ -1720,50 +1742,51 @@ with tab3:
                 key="favorite_sort_order",
             )
         df_recipes = sort_saved_recipes(df_recipes, sort_by, sort_order)
-        for _, row in df_recipes.iterrows():
-            recipe = row.to_dict()
-            note_mark = "  ·  💬" if has_recipe_comment(recipe) else ""
-            heading = f"{recipe['title']}  ·  {format_star_rating(recipe.get('rating'))}{note_mark}"
-            with st.expander(heading):
-                recipe_col, rating_col = st.columns([0.82, 0.18], vertical_alignment="top")
-                with recipe_col:
-                    if recipe.get("ingredients"):
-                        st.caption(f"Pantry ingredients used: {recipe['ingredients']}")
-                    st.markdown(recipe["instructions"])
-                    action_row = st.columns(4)
-                    with action_row[0]:
-                        if st.button("Edit recipe", key=f"edit_recipe_{recipe['id']}"):
-                            _open_edit_favorite_dialog(recipe)
-                    with action_row[1]:
-                        comment_label = "Add comment" if not has_recipe_comment(recipe) else "Edit comment"
-                        if st.button(comment_label, key=f"comment_recipe_{recipe['id']}"):
-                            _open_comment_dialog(recipe)
-                    with action_row[2]:
-                        if st.button("Rate favorite", key=f"rate_recipe_{recipe['id']}"):
-                            _open_rate_dialog(recipe)
-                    with action_row[3]:
-                        if st.button("Delete favorite", key=f"delete_recipe_{recipe['id']}"):
-                            _open_delete_dialog(recipe)
-                with rating_col:
-                    st.markdown(render_star_rating(recipe.get("rating")), unsafe_allow_html=True)
-                    st.caption("Rating")
-                    pdf_recipe = favorite_for_pdf(recipe)
-                    try:
-                        st.download_button(
-                            "📥 PDF",
-                            data=build_recipes_pdf([pdf_recipe]),
-                            file_name=recipes_pdf_filename([pdf_recipe]),
-                            mime="application/pdf",
-                            help="Download this favorite as a pretty kitchen PDF",
-                            key=f"pdf_fav_{recipe['id']}",
-                        )
-                    except Exception as e:
-                        st.caption(f"PDF unavailable: {e}")
-                    if has_recipe_comment(recipe):
-                        if st.button("💬 View note", key=f"view_comment_{recipe['id']}", help="Open the kitchen note for this recipe"):
-                            _open_comment_dialog(recipe)
-                    else:
-                        st.caption("No note yet")
+        with st.container(key="saved_favorites_list"):
+            for _, row in df_recipes.iterrows():
+                recipe = row.to_dict()
+                note_mark = "  ·  💬" if has_recipe_comment(recipe) else ""
+                heading = f"{recipe['title']}  ·  {format_star_rating(recipe.get('rating'))}{note_mark}"
+                with st.expander(heading):
+                    recipe_col, rating_col = st.columns([0.82, 0.18], vertical_alignment="top")
+                    with recipe_col:
+                        if recipe.get("ingredients"):
+                            st.caption(f"Pantry ingredients used: {recipe['ingredients']}")
+                        st.markdown(recipe["instructions"])
+                        action_row = st.columns(4)
+                        with action_row[0]:
+                            if st.button("Edit recipe", key=f"edit_recipe_{recipe['id']}"):
+                                _open_edit_favorite_dialog(recipe)
+                        with action_row[1]:
+                            comment_label = "Add comment" if not has_recipe_comment(recipe) else "Edit comment"
+                            if st.button(comment_label, key=f"comment_recipe_{recipe['id']}"):
+                                _open_comment_dialog(recipe)
+                        with action_row[2]:
+                            if st.button("Rate favorite", key=f"rate_recipe_{recipe['id']}"):
+                                _open_rate_dialog(recipe)
+                        with action_row[3]:
+                            if st.button("Delete favorite", key=f"delete_recipe_{recipe['id']}"):
+                                _open_delete_dialog(recipe)
+                    with rating_col:
+                        st.markdown(render_star_rating(recipe.get("rating")), unsafe_allow_html=True)
+                        st.caption("Rating")
+                        pdf_recipe = favorite_for_pdf(recipe)
+                        try:
+                            st.download_button(
+                                "📥 PDF",
+                                data=build_recipes_pdf([pdf_recipe]),
+                                file_name=recipes_pdf_filename([pdf_recipe]),
+                                mime="application/pdf",
+                                help="Download this favorite as a pretty kitchen PDF",
+                                key=f"pdf_fav_{recipe['id']}",
+                            )
+                        except Exception as e:
+                            st.caption(f"PDF unavailable: {e}")
+                        if has_recipe_comment(recipe):
+                            if st.button("💬 View note", key=f"view_comment_{recipe['id']}", help="Open the kitchen note for this recipe"):
+                                _open_comment_dialog(recipe)
+                        else:
+                            st.caption("No note yet")
 
         if st.session_state.get("show_edit_favorite_dialog"):
             edit_favorite_dialog()
