@@ -210,6 +210,17 @@ def _as_text_list(value):
     return [" ".join(line.strip(" -•*\t").split()) for line in text.splitlines() if line.strip()]
 
 
+def _optional_text(value):
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    return str(value).strip()
+
+
 def recipe_parts(recipe):
     recipe = recipe or {}
     prep = recipe.get("prep_time") or recipe.get("prepTime") or ""
@@ -221,6 +232,8 @@ def recipe_parts(recipe):
         "ingredients": _as_text_list(recipe.get("ingredients")),
         "instructions": _as_text_list(recipe.get("instructions") or recipe.get("steps")),
         "markdown": (recipe.get("markdown") or "").strip(),
+        "pantry": _optional_text(recipe.get("pantry")),
+        "note": _optional_text(recipe.get("note") or recipe.get("comment")),
     }
 
 
@@ -322,7 +335,7 @@ class KitchenRecipePDF(FPDF):
         self.cell(0, 7, _pdf_text("Pantry Chef  ·  Household kitchen copy", self.unicode_ok))
         self.set_fill_color(232, 214, 196)
         self.rect(0, 16, self.w, 1.2, "F")
-        self.set_y(24)
+        self.set_xy(self.l_margin, 24)
         self.set_text_color(61, 43, 31)
 
     def footer(self):
@@ -342,6 +355,7 @@ class KitchenRecipePDF(FPDF):
 
 def _write_pdf_section_label(pdf, label):
     pdf.ln(4)
+    pdf.set_x(pdf.l_margin)
     pdf.set_font(pdf.font_family_name, "B", 10)
     pdf.set_text_color(196, 92, 38)
     pdf.cell(0, 6, label.upper())
@@ -350,8 +364,22 @@ def _write_pdf_section_label(pdf, label):
     pdf.set_draw_color(232, 214, 196)
     pdf.line(pdf.l_margin, y, pdf.w - pdf.r_margin, y)
     pdf.ln(4)
+    pdf.set_xy(pdf.l_margin, pdf.get_y())
     pdf.set_text_color(61, 43, 31)
     pdf.set_font(pdf.font_family_name, "", 11)
+
+
+def _write_pdf_hanging_line(pdf, marker, text, marker_w, line_h, unicode_ok):
+    pdf.set_x(pdf.l_margin)
+    family = pdf.font_family_name
+    pdf.set_font(family, "B", 11)
+    pdf.set_text_color(196, 92, 38)
+    pdf.cell(marker_w, line_h, _pdf_text(marker, unicode_ok))
+    pdf.set_font(family, "", 11)
+    pdf.set_text_color(61, 43, 31)
+    remain = max(pdf.w - pdf.r_margin - pdf.get_x(), 20)
+    pdf.multi_cell(remain, line_h, _pdf_text(text, unicode_ok))
+    pdf.set_x(pdf.l_margin)
 
 
 def build_recipes_pdf(recipes):
@@ -367,6 +395,7 @@ def build_recipes_pdf(recipes):
     for recipe in recipes or []:
         pdf.add_page()
         parts = recipe_parts(recipe)
+        pdf.set_xy(pdf.l_margin, pdf.get_y())
         pdf.set_text_color(61, 43, 31)
         pdf.set_font(family, "B", 20)
         pdf.multi_cell(0, 9, _pdf_text(parts["title"], unicode_ok))
@@ -381,34 +410,33 @@ def build_recipes_pdf(recipes):
             pdf.set_text_color(196, 92, 38)
             pdf.multi_cell(0, 7, _pdf_text("  ·  ".join(meta), unicode_ok))
             pdf.set_text_color(61, 43, 31)
+        if parts.get("pantry"):
+            pdf.set_x(pdf.l_margin)
+            pdf.set_font(family, "", 9)
+            pdf.set_text_color(138, 112, 96)
+            pdf.multi_cell(0, 5, _pdf_text(f"Pantry used: {parts['pantry']}", unicode_ok))
+            pdf.set_text_color(61, 43, 31)
 
         if parts["ingredients"]:
             _write_pdf_section_label(pdf, "Ingredients")
             for item in parts["ingredients"]:
-                start_x = pdf.l_margin
-                pdf.set_x(start_x)
-                pdf.set_font(family, "B", 11)
-                pdf.set_text_color(196, 92, 38)
-                pdf.cell(6, 6, _pdf_text(bullet, unicode_ok))
-                pdf.set_font(family, "", 11)
-                pdf.set_text_color(61, 43, 31)
-                pdf.multi_cell(0, 6, _pdf_text(item, unicode_ok))
+                _write_pdf_hanging_line(pdf, bullet, item, 6, 6, unicode_ok)
                 pdf.ln(1)
 
         if parts["instructions"]:
             _write_pdf_section_label(pdf, "Method")
             for index, step in enumerate(parts["instructions"], 1):
-                pdf.set_font(family, "B", 11)
-                pdf.set_text_color(196, 92, 38)
-                pdf.cell(10, 6, f"{index}.")
-                pdf.set_font(family, "", 11)
-                pdf.set_text_color(61, 43, 31)
-                pdf.multi_cell(0, 6, _pdf_text(step, unicode_ok))
+                _write_pdf_hanging_line(pdf, f"{index}.", step, 10, 6, unicode_ok)
                 pdf.ln(2)
 
         if not parts["ingredients"] and not parts["instructions"] and parts["markdown"]:
             _write_pdf_section_label(pdf, "Recipe")
             pdf.multi_cell(0, 6, _pdf_text(_plain_from_markdown(parts["markdown"]), unicode_ok))
+
+        if parts.get("note"):
+            _write_pdf_section_label(pdf, "Kitchen note")
+            pdf.set_x(pdf.l_margin)
+            pdf.multi_cell(0, 6, _pdf_text(parts["note"], unicode_ok))
 
     return bytes(pdf.output())
 
@@ -418,6 +446,69 @@ def recipes_pdf_filename(recipes):
         slug = re.sub(r"[^a-z0-9]+", "-", (recipes[0].get("title") or "recipe").lower()).strip("-")
         return f"{(slug or 'recipe')[:48]}.pdf"
     return "pantry-recipes.pdf"
+
+
+def parse_recipe_markdown(text):
+    raw = (text or "").strip()
+    parsed = {
+        "title": "",
+        "prep": "",
+        "cook": "",
+        "ingredients": [],
+        "instructions": [],
+        "markdown": raw,
+    }
+    if not raw:
+        return parsed
+    section = None
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        heading = re.match(r"^#{1,6}\s+(.*)$", stripped)
+        if heading:
+            label = heading.group(1).strip()
+            key = re.sub(r"[^a-z]+", "", label.lower())
+            if key.startswith("ingredient"):
+                section = "ingredients"
+            elif key in ("instructions", "method", "steps", "directions"):
+                section = "instructions"
+            elif not parsed["title"]:
+                parsed["title"] = label
+                section = None
+            continue
+        meta_line = stripped.replace("**", "")
+        if re.search(r"prep\s*:", meta_line, re.I) or re.search(r"cook\s*:", meta_line, re.I):
+            prep = re.search(r"prep\s*:\s*([^·|\n]+)", meta_line, re.I)
+            cook = re.search(r"cook\s*:\s*([^·|\n]+)", meta_line, re.I)
+            if prep:
+                parsed["prep"] = prep.group(1).strip(" ·|-")
+            if cook:
+                parsed["cook"] = cook.group(1).strip(" ·|-")
+            continue
+        item = re.sub(r"^[-*•]\s+", "", stripped)
+        item = re.sub(r"^\d+[.)]\s+", "", item)
+        if section == "ingredients":
+            parsed["ingredients"].append(item)
+        elif section == "instructions":
+            parsed["instructions"].append(item)
+    return parsed
+
+
+def favorite_for_pdf(recipe):
+    recipe = recipe or {}
+    parsed = parse_recipe_markdown(recipe.get("instructions") or recipe.get("markdown") or "")
+    structured = bool(parsed["ingredients"] or parsed["instructions"])
+    return {
+        "title": _optional_text(recipe.get("title")) or parsed["title"] or "Recipe",
+        "prep_time": parsed["prep"],
+        "cook_time": parsed["cook"],
+        "ingredients": parsed["ingredients"],
+        "instructions": parsed["instructions"],
+        "markdown": "" if structured else parsed["markdown"],
+        "pantry": _optional_text(recipe.get("ingredients")),
+        "note": _optional_text(recipe.get("comment") or recipe.get("note")),
+    }
 
 
 def _title_from_markdown(text, fallback="Generated Recipe"):
@@ -879,7 +970,7 @@ Choose a **meal type** (Dinner, Breakfast, Soup, or type your own). Then pick pa
 Each recipe has its own card. Check the ones you want, then **Save selected**. **Save all separately** stores every suggestion as its own Household Favorite. Uncheck a card if you only want the other one. **Download pretty PDF** saves a print-ready kitchen copy of every generated recipe.
 
 ### Saved Recipes
-Favorites are stored in Supabase, one entry per recipe. Sort the list by **name** or **rating**, then choose **ascending** or **descending**. Open a card to reread it. **Edit recipe** changes the title, pantry line, or instructions. **Add comment** / the 💬 note badge opens a kitchen note. **Rate favorite** opens a 5-star dialog. **Delete favorite** removes it after you confirm.
+Favorites are stored in Supabase, one entry per recipe. Sort the list by **name** or **rating**, then choose **ascending** or **descending**. Open a card to reread it. **Edit recipe** changes the title, pantry line, or instructions. **Add comment** / the 💬 note badge opens a kitchen note. **Rate favorite** opens a 5-star dialog. **Delete favorite** removes it after you confirm. **PDF** on a card, or **Download all pretty PDF**, saves the same print-ready kitchen copy as the Recipe Generator.
 
 ### Tips
 - Be specific in the extra prompt (“air fryer, high protein”) so the chef stays inside your appliances and diet.
@@ -1629,6 +1720,18 @@ with tab3:
                 key="favorite_sort_order",
             )
         df_recipes = sort_saved_recipes(df_recipes, sort_by, sort_order)
+        favorite_pdf_recipes = [favorite_for_pdf(row.to_dict()) for _, row in df_recipes.iterrows()]
+        try:
+            st.download_button(
+                "📥 Download all pretty PDF",
+                data=build_recipes_pdf(favorite_pdf_recipes),
+                file_name="household-favorites.pdf",
+                mime="application/pdf",
+                help="Print-ready kitchen cards for every saved favorite, one recipe per page.",
+                key="download_all_favorites_pdf",
+            )
+        except Exception as e:
+            st.error(f"Could not build the favorites PDF: {e}")
         for _, row in df_recipes.iterrows():
             recipe = row.to_dict()
             note_mark = "  ·  💬" if has_recipe_comment(recipe) else ""
@@ -1656,6 +1759,18 @@ with tab3:
                 with rating_col:
                     st.markdown(render_star_rating(recipe.get("rating")), unsafe_allow_html=True)
                     st.caption("Rating")
+                    pdf_recipe = favorite_for_pdf(recipe)
+                    try:
+                        st.download_button(
+                            "📥 PDF",
+                            data=build_recipes_pdf([pdf_recipe]),
+                            file_name=recipes_pdf_filename([pdf_recipe]),
+                            mime="application/pdf",
+                            help="Download this favorite as a pretty kitchen PDF",
+                            key=f"pdf_fav_{recipe['id']}",
+                        )
+                    except Exception as e:
+                        st.caption(f"PDF unavailable: {e}")
                     if has_recipe_comment(recipe):
                         if st.button("💬 View note", key=f"view_comment_{recipe['id']}", help="Open the kitchen note for this recipe"):
                             _open_comment_dialog(recipe)
