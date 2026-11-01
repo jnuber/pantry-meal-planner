@@ -2,6 +2,7 @@ import html
 import json
 import re
 from pathlib import Path
+from urllib.parse import quote
 
 import streamlit as st
 import pandas as pd
@@ -12,24 +13,25 @@ from google.genai import types
 from supabase import create_client, Client
 
 DEFAULT_APPLIANCES = [
-    "Oven",
-    "Stovetop",
     "Air Fryer",
-    "Instant Pot / Pressure Cooker",
-    "Microwave",
-    "Slow Cooker",
-    "Grill / BBQ",
-    "Toaster Oven",
-    "Rice Cooker",
     "Blender",
-    "Food Processor",
-    "Sous Vide",
-    "Griddle / Cast Iron",
     "Bread Maker",
-    "Waffle Iron",
     "Deep Fryer",
-    "Smoker",
+    "Food Processor",
+    "Griddle / Cast Iron",
+    "Grill / BBQ",
     "Induction Cooktop",
+    "Instant Pot / Pressure Cooker",
+    "Iron Skillet",
+    "Microwave",
+    "Oven",
+    "Rice Cooker",
+    "Slow Cooker",
+    "Smoker",
+    "Sous Vide",
+    "Stovetop",
+    "Toaster Oven",
+    "Waffle Iron",
 ]
 
 COUNT_UNITS = [
@@ -511,6 +513,193 @@ def favorite_for_pdf(recipe):
     }
 
 
+_GROCERY_STOP_TOKENS = {
+    "and",
+    "the",
+    "for",
+    "with",
+    "from",
+    "oil",
+    "salt",
+    "pepper",
+    "water",
+    "fresh",
+    "dried",
+    "ground",
+    "sauce",
+    "optional",
+}
+
+
+def recipe_for_grocery(recipe):
+    ingredients = _as_text_list((recipe or {}).get("ingredients"))
+    if ingredients and isinstance((recipe or {}).get("ingredients"), list):
+        return recipe
+    converted = favorite_for_pdf(recipe)
+    if converted.get("ingredients"):
+        return converted
+    return recipe or {}
+
+
+def _ingredient_core(line):
+    text = _optional_text(line)
+    text = re.sub(r"\([^)]*\)", " ", text)
+    text = re.sub(
+        r"^[\d¼½¾./\s-]+(?:fl\s*oz|tsp|tbsp|tbsp|oz|lb|lbs|g|kg|ml|l|cup|cups|can|cans|"
+        r"pack|each|clove|slice|pinch|dash|bunch|jar|bag)?s?\b\s*",
+        "",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
+        r"\b(diced|sliced|chopped|grated|minced|fresh|dried|optional|divided|to taste|"
+        r"for serving|plus more|staple|pantry)\b",
+        " ",
+        text,
+        flags=re.I,
+    )
+    return re.sub(r"\s+", " ", text).strip(" ,.-")
+
+
+def _name_tokens(value):
+    return [
+        token
+        for token in re.split(r"[^a-z0-9]+", (value or "").casefold())
+        if len(token) > 2 and token not in _GROCERY_STOP_TOKENS
+    ]
+
+
+def match_pantry_item(line, pantry_names):
+    core = _ingredient_core(line)
+    if not core:
+        return None
+    core_l = core.casefold()
+    ranked = sorted((str(name) for name in pantry_names or [] if name), key=len, reverse=True)
+
+    def _same_words(left, right):
+        if left == right:
+            return True
+        pattern = r"(^|[^a-z0-9])" + re.escape(left) + r"([^a-z0-9]|$)"
+        return bool(re.search(pattern, right))
+
+    for name in ranked:
+        pantry_l = name.casefold()
+        if _same_words(core_l, pantry_l) or _same_words(pantry_l, core_l):
+            return name
+    core_tokens = _name_tokens(core)
+    if not core_tokens:
+        return None
+    best_name = None
+    best_score = 0
+    for name in ranked:
+        pantry_tokens = _name_tokens(name)
+        if not pantry_tokens:
+            continue
+        hits = sum(
+            1
+            for token in core_tokens
+            if any(
+                token == pt
+                or (
+                    len(token) >= 6
+                    and len(pt) >= 6
+                    and (token.startswith(pt) or pt.startswith(token))
+                )
+                for pt in pantry_tokens
+            )
+        )
+        score = hits / len(core_tokens)
+        if score > best_score:
+            best_score = score
+            best_name = name
+    if best_score >= 0.6:
+        return best_name
+    return None
+
+
+def build_grocery_items(recipe, pantry_names, pantry_qty_by_item=None):
+    pantry_qty_by_item = pantry_qty_by_item or {}
+    prepared = recipe_for_grocery(recipe)
+    items = []
+    seen = set()
+    for line in _as_text_list(prepared.get("ingredients")):
+        key = line.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        matched = match_pantry_item(line, pantry_names)
+        items.append(
+            {
+                "text": line,
+                "in_pantry": bool(matched),
+                "pantry_match": matched or "",
+                "on_hand": pantry_qty_by_item.get(matched, matched or ""),
+            }
+        )
+    return items
+
+
+def grocery_plain_text(title, items):
+    lines = [f"Grocery list: {title}", ""]
+    need = [item for item in items if not item.get("in_pantry")]
+    have = [item for item in items if item.get("in_pantry")]
+    if need:
+        lines.append("Need to buy:")
+        lines.extend(f"- {item['text']}" for item in need)
+        lines.append("")
+    if have:
+        lines.append("Already in pantry:")
+        for item in have:
+            extra = f" ({item['on_hand']})" if item.get("on_hand") else ""
+            lines.append(f"✓ {item['text']}{extra}")
+    return "\n".join(lines).strip()
+
+
+def grocery_mailto(title, items):
+    subject = f"Grocery list: {title}"
+    body = grocery_plain_text(title, items)
+    return f"mailto:?subject={quote(subject)}&body={quote(body)}"
+
+
+def build_grocery_pdf(title, items):
+    regular, bold = _kitchen_fonts()
+    unicode_ok = bool(regular)
+    family = "Kitchen" if unicode_ok else "Helvetica"
+    pdf = KitchenRecipePDF(family, unicode_ok=unicode_ok)
+    if unicode_ok:
+        pdf.add_font(family, "", regular)
+        pdf.add_font(family, "B", bold)
+    empty = "☐" if unicode_ok else "[ ]"
+    checked = "✓" if unicode_ok else "[x]"
+    pdf.add_page()
+    pdf.set_xy(pdf.l_margin, pdf.get_y())
+    pdf.set_font(family, "B", 18)
+    pdf.multi_cell(0, 8, _pdf_text(f"Grocery list: {title}", unicode_ok))
+    pdf.ln(2)
+    need = [item for item in items if not item.get("in_pantry")]
+    have = [item for item in items if item.get("in_pantry")]
+    if need:
+        _write_pdf_section_label(pdf, "Need to buy")
+        for item in need:
+            _write_pdf_hanging_line(pdf, empty, item["text"], 10, 7, unicode_ok)
+            pdf.ln(1)
+    if have:
+        _write_pdf_section_label(pdf, "Already in pantry")
+        for item in have:
+            extra = f"  ({item['on_hand']})" if item.get("on_hand") else ""
+            _write_pdf_hanging_line(pdf, checked, item["text"] + extra, 10, 7, unicode_ok)
+            pdf.ln(1)
+    if not need and not have:
+        pdf.set_font(family, "", 11)
+        pdf.multi_cell(0, 6, _pdf_text("No ingredients were found on this recipe.", unicode_ok))
+    return bytes(pdf.output())
+
+
+def grocery_pdf_filename(title):
+    slug = re.sub(r"[^a-z0-9]+", "-", (title or "grocery-list").lower()).strip("-")
+    return f"{(slug or 'grocery-list')[:48]}-grocery.pdf"
+
+
 def _title_from_markdown(text, fallback="Generated Recipe"):
     for line in text.splitlines():
         stripped = line.strip()
@@ -652,6 +841,7 @@ DEFAULT_DIETARY = [
     "Egg-Free",
     "Shellfish-Free",
     "Low-Sodium",
+    "Low-Cholesterol",
     "Low-FODMAP",
     "Diabetic-Friendly",
     "Whole30",
@@ -723,7 +913,10 @@ except Exception:
 def load_tag_options(kind, defaults):
     response = supabase.table("custom_tags").select("name").eq("kind", kind).order("name").execute()
     extras = [row["name"] for row in (response.data or []) if row.get("name") and row["name"] not in defaults]
-    return defaults + extras
+    combined = list(defaults) + extras
+    if kind == "appliance":
+        combined = sorted(combined, key=str.casefold)
+    return combined
 
 
 def add_custom_tag(kind, name, existing):
@@ -827,6 +1020,57 @@ def save_favorite_recipe(title, ingredients, instructions):
             "instructions": instructions,
         }
     ).execute()
+
+
+def save_grocery_list(title, items):
+    supabase.table("grocery_lists").insert(
+        {
+            "title": title,
+            "recipe_title": title,
+            "items": items,
+        }
+    ).execute()
+
+
+def fetch_grocery_lists():
+    response = (
+        supabase.table("grocery_lists")
+        .select("*")
+        .order("created_at", desc=True)
+        .limit(20)
+        .execute()
+    )
+    rows = []
+    for row in response.data or []:
+        rows.append(
+            {
+                "id": row.get("id"),
+                "title": row.get("title") or row.get("recipe_title") or "Grocery list",
+                "items": row.get("items") or [],
+                "created_at": row.get("created_at") or "",
+            }
+        )
+    return rows
+
+
+def delete_grocery_list(list_id):
+    supabase.table("grocery_lists").delete().eq("id", list_id).execute()
+
+
+def current_pantry_lookup():
+    names = []
+    qty_by_item = {}
+    try:
+        df_pantry = fetch_inventory_df()
+    except Exception:
+        return names, qty_by_item
+    if df_pantry.empty:
+        return names, qty_by_item
+    names = df_pantry["item"].tolist()
+    for _, row in df_pantry.iterrows():
+        qty = format_quantity(row.get("amount"), row.get("unit")) or row.get("quantity") or ""
+        qty_by_item[row["item"]] = f"{row['item']} ({qty})" if qty else row["item"]
+    return names, qty_by_item
 
 
 def _text_or_empty(value):
@@ -967,10 +1211,10 @@ Add an ingredient name, category, amount, and unit. Choosing **Imperial** or **M
 ### Recipe Generator
 Choose a **meal type** (Dinner, Breakfast, Soup, or type your own). Then pick pantry items to cook with — nothing is pre-selected. Add an optional craving, then generate ideas. The chef looks for that meal type using what you chose and usually returns **two short** recipes (capped length so it stays quick).
 
-Each recipe has its own card. Check the ones you want, then **Save selected**. **Save all separately** stores every suggestion as its own Household Favorite. Uncheck a card if you only want the other one. **Download pretty PDF** saves a print-ready kitchen copy of every generated recipe.
+Each recipe has its own card. Check the ones you want, then **Save selected**. **Save all separately** stores every suggestion as its own Household Favorite. Uncheck a card if you only want the other one. **Download pretty PDF** saves a print-ready kitchen copy of every generated recipe. **Grocery list** compares the recipe to your pantry: items you already have are checked off, and the rest get a shopping checkbox. You can save, download/print, or email that list.
 
 ### Saved Recipes
-Favorites are stored in Supabase, one entry per recipe. Sort the list by **name** or **rating**, then choose **ascending** or **descending**. Open a card to reread it. **Edit recipe** changes the title, pantry line, or instructions. **Add comment** / the 💬 note badge opens a kitchen note. **Rate favorite** opens a 5-star dialog. **Delete favorite** removes it after you confirm. **PDF** on a card saves the same print-ready kitchen copy as the Recipe Generator.
+Favorites are stored in Supabase, one entry per recipe. Sort the list by **name** or **rating**, then choose **ascending** or **descending**. Open a card to reread it. **Edit recipe** changes the title, pantry line, or instructions. **Add comment** / the 💬 note badge opens a kitchen note. **Rate favorite** opens a 5-star dialog. **Delete favorite** removes it after you confirm. **PDF** on a card saves the same print-ready kitchen copy as the Recipe Generator. **Grocery list** builds a shopping list from that favorite. Saved lists appear at the bottom of this tab.
 
 ### Tips
 - Be specific in the extra prompt (“air fryer, high protein”) so the chef stays inside your appliances and diet.
@@ -1195,6 +1439,24 @@ def _close_comment_dialog():
     st.session_state.show_comment_dialog = False
 
 
+def _close_grocery_dialog():
+    st.session_state.show_grocery_dialog = False
+
+
+def _open_grocery_dialog(recipe, source_key):
+    pantry_names, pantry_qty = current_pantry_lookup()
+    items = build_grocery_items(recipe, pantry_names, pantry_qty)
+    prepared = recipe_for_grocery(recipe)
+    st.session_state.grocery_title = prepared.get("title") or recipe.get("title") or "Recipe"
+    st.session_state.grocery_items = items
+    st.session_state.grocery_source_key = source_key
+    prefix = f"gshop_{source_key}_"
+    for key in list(st.session_state.keys()):
+        if str(key).startswith(prefix):
+            del st.session_state[key]
+    st.session_state.show_grocery_dialog = True
+
+
 def _open_edit_favorite_dialog(recipe):
     item = dict(recipe)
     st.session_state.edit_favorite = item
@@ -1324,6 +1586,72 @@ def recipe_comment_dialog():
         st.rerun()
 
 
+@st.dialog("Grocery list", width="large", on_dismiss=_close_grocery_dialog)
+def grocery_list_dialog():
+    title = st.session_state.get("grocery_title") or "Recipe"
+    items = list(st.session_state.get("grocery_items") or [])
+    source_key = st.session_state.get("grocery_source_key") or "list"
+    st.write(f"Shopping list for **{title}**")
+    st.caption("Items already in pantry_inventory are marked. Check off what you still need as you shop.")
+    need = [item for item in items if not item.get("in_pantry")]
+    have = [item for item in items if item.get("in_pantry")]
+    if not items:
+        st.info("This recipe has no ingredient list to shop from.")
+    if need:
+        st.markdown("**Need to buy**")
+        for index, item in enumerate(need):
+            st.checkbox(item["text"], key=f"gshop_{source_key}_{index}")
+    else:
+        st.success("Everything on this recipe is already in the pantry.")
+    if have:
+        st.markdown("**Already in pantry**")
+        for item in have:
+            extra = f" — on hand: {item['on_hand']}" if item.get("on_hand") else ""
+            st.markdown(f"✓ {item['text']}{extra}")
+
+    def _items_with_checks():
+        updated = []
+        need_index = 0
+        for item in items:
+            row = dict(item)
+            if row.get("in_pantry"):
+                row["checked"] = True
+            else:
+                row["checked"] = bool(st.session_state.get(f"gshop_{source_key}_{need_index}"))
+                need_index += 1
+            updated.append(row)
+        return updated
+
+    save_col, print_col, email_col = st.columns(3)
+    with save_col:
+        if st.button("Save list", type="primary"):
+            try:
+                save_grocery_list(title, _items_with_checks())
+                st.success("Grocery list saved for later.")
+            except Exception as e:
+                st.error(
+                    "Could not save the grocery list. Add the grocery_lists table in Supabase, then try again. "
+                    f"({e})"
+                )
+    with print_col:
+        try:
+            st.download_button(
+                "Download / print PDF",
+                data=build_grocery_pdf(title, items),
+                file_name=grocery_pdf_filename(title),
+                mime="application/pdf",
+                help="Open the PDF and use your browser or phone print dialog.",
+                key=f"grocery_pdf_{source_key}",
+            )
+        except Exception as e:
+            st.caption(f"PDF unavailable: {e}")
+    with email_col:
+        st.link_button("Email list", grocery_mailto(title, items))
+    if st.button("Close", key="close_grocery_dialog"):
+        st.session_state.show_grocery_dialog = False
+        st.rerun()
+
+
 title_col, help_col = st.columns([0.9, 0.1], vertical_alignment="center")
 with title_col:
     st.title("🍳 Meal Planner & Pantry Recipe Generator")
@@ -1363,7 +1691,7 @@ try:
     appliance_options = load_tag_options("appliance", DEFAULT_APPLIANCES)
     dietary_options = load_tag_options("dietary", DEFAULT_DIETARY)
 except Exception as e:
-    appliance_options = list(DEFAULT_APPLIANCES)
+    appliance_options = sorted(DEFAULT_APPLIANCES, key=str.casefold)
     dietary_options = list(DEFAULT_DIETARY)
     st.sidebar.warning(f"Custom preference lists could not be loaded: {e}")
 
@@ -1659,6 +1987,8 @@ with tab2:
                     value=True,
                     key=f"save_pick_{index}",
                 )
+                if st.button("Grocery list", key=f"grocery_gen_{index}"):
+                    _open_grocery_dialog(recipe, f"gen-{index}")
             if chosen:
                 selected_to_save.append(recipe)
 
@@ -1753,7 +2083,7 @@ with tab3:
                         if recipe.get("ingredients"):
                             st.caption(f"Pantry ingredients used: {recipe['ingredients']}")
                         st.markdown(recipe["instructions"])
-                        action_row = st.columns(4)
+                        action_row = st.columns(5)
                         with action_row[0]:
                             if st.button("Edit recipe", key=f"edit_recipe_{recipe['id']}"):
                                 _open_edit_favorite_dialog(recipe)
@@ -1767,6 +2097,9 @@ with tab3:
                         with action_row[3]:
                             if st.button("Delete favorite", key=f"delete_recipe_{recipe['id']}"):
                                 _open_delete_dialog(recipe)
+                        with action_row[4]:
+                            if st.button("Grocery list", key=f"grocery_fav_{recipe['id']}"):
+                                _open_grocery_dialog(recipe, f"fav-{recipe['id']}")
                     with rating_col:
                         st.markdown(render_star_rating(recipe.get("rating")), unsafe_allow_html=True)
                         st.caption("Rating")
@@ -1796,3 +2129,52 @@ with tab3:
             rate_favorite_dialog()
         if st.session_state.get("show_delete_dialog"):
             confirm_delete_favorite_dialog()
+
+    st.markdown("### Saved grocery lists")
+    try:
+        grocery_lists = fetch_grocery_lists()
+    except Exception:
+        grocery_lists = None
+        st.caption(
+            "To save grocery lists, run the grocery_lists SQL in the Supabase SQL editor, then rerun."
+        )
+    if grocery_lists:
+        for glist in grocery_lists:
+            heading = glist["title"]
+            with st.expander(heading):
+                need = [item for item in glist["items"] if not item.get("in_pantry")]
+                have = [item for item in glist["items"] if item.get("in_pantry")]
+                if need:
+                    st.markdown("**Need to buy**")
+                    for item in need:
+                        mark = "☑" if item.get("checked") else "☐"
+                        st.markdown(f"{mark} {item.get('text') or ''}")
+                if have:
+                    st.markdown("**Already in pantry**")
+                    for item in have:
+                        extra = f" — {item.get('on_hand')}" if item.get("on_hand") else ""
+                        st.markdown(f"✓ {item.get('text') or ''}{extra}")
+                pdf_col, del_col = st.columns(2)
+                with pdf_col:
+                    try:
+                        st.download_button(
+                            "Download / print PDF",
+                            data=build_grocery_pdf(glist["title"], glist["items"]),
+                            file_name=grocery_pdf_filename(glist["title"]),
+                            mime="application/pdf",
+                            key=f"saved_grocery_pdf_{glist['id']}",
+                        )
+                    except Exception as e:
+                        st.caption(f"PDF unavailable: {e}")
+                with del_col:
+                    if st.button("Delete list", key=f"delete_grocery_{glist['id']}"):
+                        try:
+                            delete_grocery_list(glist["id"])
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Could not delete list: {e}")
+    elif grocery_lists is not None:
+        st.caption("No saved grocery lists yet. Open a recipe and click Grocery list.")
+
+if st.session_state.get("show_grocery_dialog"):
+    grocery_list_dialog()

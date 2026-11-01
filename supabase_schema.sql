@@ -48,3 +48,16 @@ alter table saved_recipes
     check (rating is null or (rating >= 1 and rating <= 5));
 
 alter table saved_recipes add column if not exists comment text;
+
+create table if not exists grocery_lists (
+    id bigint generated always as identity primary key,
+    title text,
+    recipe_title text,
+    items jsonb not null default '[]'::jsonb,
+    created_at timestamptz default now()
+);
+
+alter table grocery_lists enable row level security;
+
+drop policy if exists "grocery_lists_all" on grocery_lists;
+create policy "grocery_lists_all" on grocery_lists for all using (true) with check (true);
