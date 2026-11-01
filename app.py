@@ -12,7 +12,7 @@ from google import genai
 from google.genai import types
 from supabase import create_client, Client
 
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.6.0"
 
 DEFAULT_APPLIANCES = [
     "Air Fryer",
@@ -77,6 +77,11 @@ PANTRY_CATEGORIES = [
     "Pantry Staples",
     "Spices",
     "Frozen",
+    "Oils, Vinegars & Condiments",
+    "Baking & Cooking Staples",
+    "Breakfast & Cereals",
+    "Beverages & Coffee",
+    "Grains & Pastas",
 ]
 
 MEAL_TYPES = [
@@ -177,6 +182,10 @@ def parse_quantity(raw):
     return amount, unit, detect_unit_system(unit)
 
 
+NUTRITION_DISCLAIMER = (
+    "Nutrition values and diet labels are estimates only, not lab analysis or medical advice."
+)
+
 NUTRITION_FIELDS = [
     ("calories", "Calories", ("calories", "kcal", "calorie")),
     ("protein", "Protein", ("protein",)),
@@ -203,6 +212,30 @@ def _nutrition_from_mapping(raw):
                 nutrition[key] = text
                 break
     return nutrition
+
+
+def extract_diet_tags(recipe):
+    recipe = recipe or {}
+    tags = (
+        recipe.get("diet_tags")
+        or recipe.get("dietary_tags")
+        or recipe.get("diet")
+        or recipe.get("dietary_category")
+        or []
+    )
+    if isinstance(tags, str):
+        tags = [part.strip() for part in re.split(r"[,;/|]", tags) if part.strip()]
+    cleaned = []
+    seen = set()
+    for tag in _as_text_list(tags):
+        key = tag.casefold()
+        if key in seen or key in {"none", "n/a"}:
+            continue
+        seen.add(key)
+        cleaned.append(tag)
+        if len(cleaned) == 4:
+            break
+    return cleaned
 
 
 def extract_nutrition(recipe):
@@ -248,10 +281,15 @@ def recipe_to_markdown(recipe):
     cook = recipe.get("cook_time")
     if prep or cook:
         lines.append(f"**Prep:** {prep or '—'}  ·  **Cook:** {cook or '—'}")
+    diet_tags = extract_diet_tags(recipe)
+    if diet_tags:
+        lines.append("### Diet")
+        lines.append(", ".join(diet_tags))
     nutrition = extract_nutrition(recipe)
     if nutrition:
         lines.append("### Nutrition (per serving, estimated)")
         lines.append("**" + nutrition_summary(nutrition).replace(" · ", "**  ·  **") + "**")
+    lines.append(f"*{NUTRITION_DISCLAIMER}*")
     ingredients = recipe.get("ingredients") or []
     if ingredients:
         lines.append("### Ingredients")
@@ -295,22 +333,36 @@ def _optional_text(value):
 
 def recipe_parts(recipe):
     recipe = recipe or {}
-    prep = recipe.get("prep_time") or recipe.get("prepTime") or ""
-    cook = recipe.get("cook_time") or recipe.get("cookTime") or ""
+    prep = str(recipe.get("prep_time") or recipe.get("prepTime") or "").strip()
+    cook = str(recipe.get("cook_time") or recipe.get("cookTime") or "").strip()
+    ingredients = _as_text_list(recipe.get("ingredients"))
+    instructions = _as_text_list(recipe.get("instructions") or recipe.get("steps"))
+    nutrition = extract_nutrition(recipe)
+    diet_tags = extract_diet_tags(recipe)
+    markdown = (recipe.get("markdown") or "").strip()
+    if markdown and (not ingredients or not instructions or not nutrition or not diet_tags):
+        parsed = parse_recipe_markdown(markdown)
+        ingredients = ingredients or parsed["ingredients"]
+        instructions = instructions or parsed["instructions"]
+        nutrition = nutrition or parsed.get("nutrition") or {}
+        diet_tags = diet_tags or parsed.get("diet_tags") or []
+        prep = prep or parsed.get("prep") or ""
+        cook = cook or parsed.get("cook") or ""
     return {
         "title": (recipe.get("title") or "Recipe").strip() or "Recipe",
-        "prep": str(prep).strip(),
-        "cook": str(cook).strip(),
-        "ingredients": _as_text_list(recipe.get("ingredients")),
-        "instructions": _as_text_list(recipe.get("instructions") or recipe.get("steps")),
-        "markdown": (recipe.get("markdown") or "").strip(),
+        "prep": prep,
+        "cook": cook,
+        "ingredients": ingredients,
+        "instructions": instructions,
+        "markdown": markdown,
         "pantry": _optional_text(recipe.get("pantry")),
         "note": _optional_text(recipe.get("note") or recipe.get("comment")),
-        "nutrition": extract_nutrition(recipe),
+        "nutrition": nutrition,
+        "diet_tags": diet_tags,
     }
 
 
-def recipe_to_html(recipe):
+def recipe_to_html(recipe, show_title=True):
     parts = recipe_parts(recipe)
     meta = []
     if parts["prep"]:
@@ -318,6 +370,11 @@ def recipe_to_html(recipe):
     if parts["cook"]:
         meta.append(f"Cook {html.escape(parts['cook'])}")
     meta_html = f'<p class="recipe-meta">{" · ".join(meta)}</p>' if meta else ""
+    diet_html = ""
+    diet_tags = parts.get("diet_tags") or []
+    if diet_tags:
+        pills = "".join(f"<span>{html.escape(tag)}</span>" for tag in diet_tags)
+        diet_html = f'<div class="recipe-diet"><strong>Leans toward</strong> {pills}</div>'
     nutrition_html = ""
     nutrition = parts.get("nutrition") or {}
     chips = "".join(
@@ -326,10 +383,8 @@ def recipe_to_html(recipe):
         if nutrition.get(key)
     )
     if chips:
-        nutrition_html = (
-            f'<div class="recipe-nutrition">{chips}</div>'
-            '<p class="recipe-nutrition-note">Per serving, estimated — not a lab analysis.</p>'
-        )
+        nutrition_html = f'<div class="recipe-nutrition">{chips}</div>'
+    disclaimer_html = f'<p class="recipe-nutrition-note">{html.escape(NUTRITION_DISCLAIMER)}</p>'
     columns = []
     if parts["ingredients"]:
         items = "".join(f"<li>{html.escape(item)}</li>" for item in parts["ingredients"])
@@ -338,10 +393,10 @@ def recipe_to_html(recipe):
         steps = "".join(f"<li>{html.escape(step)}</li>" for step in parts["instructions"])
         columns.append(f'<div class="recipe-col"><h3>Method</h3><ol>{steps}</ol></div>')
     grid = f'<div class="recipe-grid">{"".join(columns)}</div>' if columns else ""
+    title_html = f'<h2>{html.escape(parts["title"])}</h2>' if show_title else ""
     return (
         f'<article class="recipe-sheet">'
-        f'<h2>{html.escape(parts["title"])}</h2>'
-        f"{meta_html}{nutrition_html}{grid}"
+        f"{title_html}{meta_html}{diet_html}{nutrition_html}{disclaimer_html}{grid}"
         f"</article>"
     )
 
@@ -501,9 +556,19 @@ def build_recipes_pdf(recipes):
             pdf.set_font(family, "", 9)
             pdf.set_text_color(61, 43, 31)
             pdf.multi_cell(0, 5, _pdf_text(nutrition_line, unicode_ok))
-            pdf.set_text_color(138, 112, 96)
-            pdf.multi_cell(0, 5, _pdf_text("Per serving, estimated.", unicode_ok))
             pdf.set_text_color(61, 43, 31)
+        diet_tags = parts.get("diet_tags") or []
+        if diet_tags:
+            pdf.set_x(pdf.l_margin)
+            pdf.set_font(family, "B", 9)
+            pdf.set_text_color(196, 92, 38)
+            pdf.multi_cell(0, 5, _pdf_text("Leans toward: " + " · ".join(diet_tags), unicode_ok))
+            pdf.set_text_color(61, 43, 31)
+        pdf.set_x(pdf.l_margin)
+        pdf.set_font(family, "", 8)
+        pdf.set_text_color(138, 112, 96)
+        pdf.multi_cell(0, 4, _pdf_text(NUTRITION_DISCLAIMER, unicode_ok))
+        pdf.set_text_color(61, 43, 31)
         if parts.get("pantry"):
             pdf.set_x(pdf.l_margin)
             pdf.set_font(family, "", 9)
@@ -551,6 +616,7 @@ def parse_recipe_markdown(text):
         "ingredients": [],
         "instructions": [],
         "nutrition": {},
+        "diet_tags": [],
         "markdown": raw,
     }
     if not raw:
@@ -570,11 +636,19 @@ def parse_recipe_markdown(text):
                 section = "instructions"
             elif key.startswith("nutrition"):
                 section = "nutrition"
+            elif key in ("diet", "diets", "dietary", "diettags") or key.startswith("diet"):
+                section = "diet"
             elif not parsed["title"]:
                 parsed["title"] = label
                 section = None
             continue
         meta_line = stripped.replace("**", "")
+        if "estimates only" in meta_line.casefold() or "not lab" in meta_line.casefold():
+            continue
+        if section == "diet":
+            parsed["diet_tags"] = extract_diet_tags({"diet_tags": meta_line})
+            section = None
+            continue
         if re.search(r"calories\s*:?", meta_line, re.I) or section == "nutrition":
             _merge_nutrition_line(meta_line, parsed["nutrition"])
             if section == "nutrition" or re.search(r"calories\s*:?", meta_line, re.I):
@@ -610,6 +684,7 @@ def favorite_for_pdf(recipe):
         "pantry": _optional_text(recipe.get("ingredients")),
         "note": _optional_text(recipe.get("comment") or recipe.get("note")),
         "nutrition": parsed.get("nutrition") or {},
+        "diet_tags": parsed.get("diet_tags") or [],
     }
 
 
@@ -854,6 +929,7 @@ def parse_generated_recipes(raw_text):
                     "ingredients": item.get("ingredients") or [],
                     "instructions": item.get("instructions") or item.get("steps") or [],
                     "nutrition": extract_nutrition(item),
+                    "diet_tags": extract_diet_tags(item),
                 }
                 recipe["markdown"] = recipe_to_markdown(recipe)
                 recipes.append(recipe)
@@ -880,8 +956,9 @@ Extra: {notes}
 
 Rules:
 - JSON array only. No markdown, no intro, no trailing notes.
-- Each object: title, prep_time, cook_time, ingredients (string[]), instructions (string[]), nutrition (object).
-- nutrition is per serving, estimated: calories (kcal), protein, fat, saturated_fat, carbs, fiber, sugar, sodium. Short values like "28 g" or "420 mg".
+- Each object: title, prep_time, cook_time, ingredients (string[]), instructions (string[]), nutrition (object), diet_tags (string[]).
+- nutrition is per serving for {servings} servings, estimated: calories (kcal), protein, fat, saturated_fat, carbs, fiber, sugar, sodium. Short values like "28 g" or "420 mg".
+- diet_tags: 1 to 3 labels this recipe fits or leans toward (e.g. High-Protein, Low-Sodium, Mediterranean). Prefer household Diet when it matches. Do not claim a certified medical diet.
 - Use pantry items plus oil, salt, pepper, water if needed. Mark pantry vs staple.
 - At most {RECIPE_MAX_STEPS} instruction steps. Each step is one short sentence.
 - Keep titles under 8 words.
@@ -1311,10 +1388,10 @@ Add an ingredient name, category, amount, and unit. Choosing **Imperial** or **M
 ### Recipe Generator
 Choose a **meal type** (Dinner, Breakfast, Soup, or type your own). Then pick pantry items to cook with — nothing is pre-selected. Add an optional craving, then generate ideas. The chef looks for that meal type using what you chose and usually returns **two short** recipes (capped length so it stays quick).
 
-Each recipe has its own card, including estimated per-serving calories, protein, fat, carbs, and sodium. Those numbers are AI estimates, not lab values. Check the ones you want, then **Save selected**. **Save all separately** stores every suggestion as its own Household Favorite. Uncheck a card if you only want the other one. **Download pretty PDF** saves a print-ready kitchen copy of every generated recipe. **Grocery list** compares the recipe to your pantry: items you already have are checked off, and the rest get a shopping checkbox. You can save, download/print, or email that list.
+Each recipe has its own card, including estimated per-serving calories, protein, fat, carbs, and sodium, plus diet labels it leans toward. Those numbers and labels are AI estimates, not lab values or medical advice. Check the ones you want, then **Save selected**. **Save all separately** stores every suggestion as its own Household Favorite. Uncheck a card if you only want the other one. **Download pretty PDF** saves a print-ready kitchen copy of every generated recipe. **Grocery list** compares the recipe to your pantry: items you already have are checked off, and the rest get a shopping checkbox. You can save, download/print, or email that list.
 
 ### Saved Recipes
-Favorites are stored in Supabase, one entry per recipe. Sort the list by **name** or **rating**, then choose **ascending** or **descending**. Open a card to reread it. **Edit recipe** changes the title, pantry line, or instructions. **Add comment** / the 💬 note badge opens a kitchen note. **Rate favorite** opens a 5-star dialog. **Delete favorite** removes it after you confirm. **PDF** on a card saves the same print-ready kitchen copy as the Recipe Generator. **Grocery list** builds a shopping list from that favorite. Saved lists appear at the bottom of this tab.
+Favorites are stored in Supabase, one entry per recipe. Sort the list by **name** or **rating**, then choose **ascending** or **descending**. Open a card to reread it — nutrition, diet lean, and the estimate disclaimer show when they were saved with the recipe. **Edit recipe** changes the title, pantry line, or instructions. **Add comment** / the 💬 note badge opens a kitchen note. **Rate favorite** opens a 5-star dialog. **Delete favorite** removes it after you confirm. **PDF** on a card saves the same print-ready kitchen copy as the Recipe Generator. **Grocery list** builds a shopping list from that favorite. Saved lists appear at the bottom of this tab.
 
 ### Tips
 - Be specific in the extra prompt (“air fryer, high protein”) so the chef stays inside your appliances and diet.
@@ -1419,6 +1496,25 @@ st.markdown(
         color: #c45c26;
         font-weight: 650;
         margin-right: 0.15rem;
+      }}
+      .recipe-diet {{
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.35rem;
+        margin: 0 0 0.45rem;
+        font-size: 0.82rem;
+        color: #3d2b1f;
+      }}
+      .recipe-diet strong {{
+        color: #c45c26;
+        margin-right: 0.2rem;
+      }}
+      .recipe-diet span {{
+        background: #fff;
+        border: 1px solid #e8d6c4;
+        border-radius: 999px;
+        padding: 0.12rem 0.55rem;
       }}
       .recipe-nutrition-note {{
         margin: 0 0 0.85rem;
@@ -2102,7 +2198,7 @@ with tab2:
             markdown = recipe_to_markdown(recipe)
             with st.expander(title, expanded=True):
                 parts = recipe_parts(recipe)
-                st.markdown(recipe_to_html(recipe), unsafe_allow_html=True)
+                st.markdown(recipe_to_html(recipe, show_title=False), unsafe_allow_html=True)
                 if not parts["ingredients"] and not parts["instructions"]:
                     st.markdown(markdown)
                 chosen = st.checkbox(
@@ -2205,7 +2301,11 @@ with tab3:
                     with recipe_col:
                         if recipe.get("ingredients"):
                             st.caption(f"Pantry ingredients used: {recipe['ingredients']}")
-                        st.markdown(recipe["instructions"])
+                        display_recipe = favorite_for_pdf(recipe)
+                        if display_recipe.get("ingredients") or display_recipe.get("instructions"):
+                            st.markdown(recipe_to_html(display_recipe, show_title=False), unsafe_allow_html=True)
+                        else:
+                            st.markdown(recipe["instructions"])
                         action_row = st.columns(5)
                         with action_row[0]:
                             if st.button("Edit recipe", key=f"edit_recipe_{recipe['id']}"):
