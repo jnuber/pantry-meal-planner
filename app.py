@@ -27,7 +27,8 @@ DEFAULT_APPLIANCES = [
     "Oven",
     "Rice Cooker",
     "Slow Cooker",
-    "Smoker",
+    "Smoker - Pellet",
+    "Smoker - Wood",
     "Sous Vide",
     "Stovetop",
     "Toaster Oven",
@@ -823,31 +824,31 @@ def generate_recipe_text(ai_provider, prompt, gemini_key, ollama_model):
 
 
 DEFAULT_DIETARY = [
-    "None",
-    "Vegetarian",
-    "Vegan",
-    "Pescatarian",
-    "Gluten-Free",
     "Dairy-Free",
-    "Keto",
-    "Low-Carb",
-    "Paleo",
-    "Halal",
-    "Kosher",
-    "Nut-Free",
-    "Peanut-Free",
-    "Tree-Nut-Free",
-    "Soy-Free",
+    "Diabetic-Friendly",
     "Egg-Free",
-    "Shellfish-Free",
-    "Low-Sodium",
+    "Gluten-Free",
+    "Halal",
+    "High-Protein",
+    "Keto",
+    "Kosher",
+    "Low-Carb",
     "Low-Cholesterol",
     "Low-FODMAP",
-    "Diabetic-Friendly",
-    "Whole30",
+    "Low-Sodium",
     "Mediterranean",
+    "None",
+    "Nut-Free",
+    "Paleo",
+    "Peanut-Free",
+    "Pescatarian",
+    "Shellfish-Free",
+    "Soy-Free",
     "Sugar-Free",
-    "High-Protein",
+    "Tree-Nut-Free",
+    "Vegan",
+    "Vegetarian",
+    "Whole30",
 ]
 
 
@@ -914,9 +915,7 @@ def load_tag_options(kind, defaults):
     response = supabase.table("custom_tags").select("name").eq("kind", kind).order("name").execute()
     extras = [row["name"] for row in (response.data or []) if row.get("name") and row["name"] not in defaults]
     combined = list(defaults) + extras
-    if kind == "appliance":
-        combined = sorted(combined, key=str.casefold)
-    return combined
+    return sorted(combined, key=str.casefold)
 
 
 def add_custom_tag(kind, name, existing):
@@ -1692,7 +1691,7 @@ try:
     dietary_options = load_tag_options("dietary", DEFAULT_DIETARY)
 except Exception as e:
     appliance_options = sorted(DEFAULT_APPLIANCES, key=str.casefold)
-    dietary_options = list(DEFAULT_DIETARY)
+    dietary_options = sorted(DEFAULT_DIETARY, key=str.casefold)
     st.sidebar.warning(f"Custom preference lists could not be loaded: {e}")
 
 
