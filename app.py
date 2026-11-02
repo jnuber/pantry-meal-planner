@@ -266,25 +266,51 @@ def parse_off_quantity(text, preferred_system):
     return amount, unit, system
 
 
+def _barcode_image_from_bytes(image_bytes):
+    from PIL import Image, ImageOps
+
+    image = Image.open(io.BytesIO(image_bytes))
+    image = ImageOps.exif_transpose(image)
+    if image.mode not in ("RGB", "L"):
+        image = image.convert("RGB")
+    max_edge = 1800
+    if max(image.size) > max_edge:
+        image.thumbnail((max_edge, max_edge))
+    return image
+
+
+def _jpeg_bytes_for_lookup(image_bytes):
+    try:
+        from PIL import Image
+
+        image = _barcode_image_from_bytes(image_bytes)
+        if image.mode != "RGB":
+            image = image.convert("RGB")
+        buffer = io.BytesIO()
+        image.save(buffer, format="JPEG", quality=85)
+        return buffer.getvalue()
+    except Exception:
+        return image_bytes
+
+
 def decode_barcodes_from_image_bytes(image_bytes):
     try:
-        from PIL import Image, ImageOps
+        from PIL import ImageOps
         import zxingcpp
     except ImportError:
         return []
     try:
-        image = Image.open(io.BytesIO(image_bytes))
-        image = ImageOps.exif_transpose(image)
+        image = _barcode_image_from_bytes(image_bytes)
     except Exception:
         return []
-    if image.mode not in ("RGB", "L"):
-        image = image.convert("RGB")
     seen = []
-    frames = [image, image.convert("L")]
+    gray = ImageOps.autocontrast(image.convert("L"))
+    frames = [image, gray]
     if max(image.size) < 900:
         frames.append(image.resize((image.width * 2, image.height * 2)))
     for frame in frames:
-        for candidate in (frame, frame.rotate(90, expand=True)):
+        for angle in (0, 90, 180, 270):
+            candidate = frame if angle == 0 else frame.rotate(angle, expand=True)
             try:
                 results = zxingcpp.read_barcodes(candidate) or []
             except Exception:
@@ -301,27 +327,37 @@ def decode_barcodes_from_image_bytes(image_bytes):
 def extract_barcode_with_gemini(image_bytes, mime_type, gemini_key):
     if not gemini_key:
         return ""
+    payload_bytes = _jpeg_bytes_for_lookup(image_bytes)
     client = genai.Client(api_key=gemini_key)
-    response = client.models.generate_content(
-        model="gemini-3.8-flash",
-        contents=[
-            types.Part.from_bytes(data=image_bytes, mime_type=mime_type or "image/jpeg"),
-            'Read the UPC or EAN barcode number on this package. JSON only: {"barcode":"digits"}. If none, {"barcode":""}.',
-        ],
-        config=types.GenerateContentConfig(
-            max_output_tokens=128,
-            response_mime_type="application/json",
-            thinking_config=types.ThinkingConfig(thinking_level=types.ThinkingLevel.LOW),
-        ),
-    )
-    payload = (response.text or "").strip()
-    try:
-        data = json.loads(payload)
-        if isinstance(data, dict):
-            return pick_product_barcode([data.get("barcode") or data.get("upc") or ""])
-    except (json.JSONDecodeError, TypeError, ValueError):
-        pass
-    return pick_product_barcode([payload])
+    last_error = None
+    for attempt in range(3):
+        try:
+            response = client.models.generate_content(
+                model="gemini-3.8-flash",
+                contents=[
+                    types.Part.from_bytes(data=payload_bytes, mime_type="image/jpeg"),
+                    'Read the UPC or EAN barcode number on this package. JSON only: {"barcode":"digits"}. If none, {"barcode":""}.',
+                ],
+                config=types.GenerateContentConfig(
+                    max_output_tokens=128,
+                    response_mime_type="application/json",
+                    thinking_config=types.ThinkingConfig(thinking_level=types.ThinkingLevel.LOW),
+                ),
+            )
+            payload = (response.text or "").strip()
+            try:
+                data = json.loads(payload)
+                if isinstance(data, dict):
+                    return pick_product_barcode([data.get("barcode") or data.get("upc") or ""])
+            except (json.JSONDecodeError, TypeError, ValueError):
+                pass
+            return pick_product_barcode([payload])
+        except Exception as error:
+            last_error = error
+            time.sleep(0.6 * (attempt + 1))
+    if last_error:
+        raise last_error
+    return ""
 
 
 def lookup_open_food_facts(barcode):
@@ -1607,7 +1643,7 @@ Pantry Chef turns what you already have on hand into meal ideas. Work left to ri
 - **Measurement system:** Imperial or Metric is the default for new pantry items. You can still change units on each item.
 
 ### Pantry Inventory
-Add an ingredient name, category, amount, and unit. Choosing **Imperial** or **Metric** on the item switches the unit list (`oz` / `lb` / `cup` versus `g` / `kg` / `ml`). **Scan a barcode** uses the camera or a photo of a UPC/EAN, looks the package up in Open Food Facts, then fills the add form — check the name and amount before you add. You can also type the barcode digits. Click a row in **Items on Hand** to edit any field except the row number, then save. Adding an existing name also updates that item. Use **Delete Selected Item** to remove something you used up.
+Add an ingredient name, category, amount, and unit. Choosing **Imperial** or **Metric** on the item switches the unit list (`oz` / `lb` / `cup` versus `g` / `kg` / `ml`). **Scan a barcode** looks up a UPC/EAN in Open Food Facts and fills the add form — check the name and amount before you add. On iPhone, tap **Take photo or upload**, then **Take Photo** so you get the full Camera app (zoom, flash, tap to focus). The in-page camera is a small browser preview without those controls. You can also type the barcode digits. Click a row in **Items on Hand** to edit any field except the row number, then save. Adding an existing name also updates that item. Use **Delete Selected Item** to remove something you used up.
 
 ### Recipe Generator
 Choose a **meal type** (Dinner, Breakfast, Soup, or type your own). Then pick pantry items to cook with — nothing is pre-selected. Add an optional craving, then generate ideas. The chef looks for that meal type using what you chose and usually returns **two short** recipes (capped length so it stays quick).
@@ -1744,6 +1780,12 @@ st.markdown(
         margin: 0 0 0.85rem;
         font-size: 0.75rem;
         color: #8a7060;
+      }}
+      [data-testid="stCameraInput"] video,
+      [data-testid="stCameraInput"] img {{
+        width: 100% !important;
+        max-height: min(70vh, 520px) !important;
+        object-fit: cover !important;
       }}
       .recipe-grid {{
         display: grid;
@@ -2221,28 +2263,107 @@ tab1, tab2, tab3 = st.tabs(["🛒 Pantry Inventory", "🤖 Recipe Generator", "�
 # --- TAB 1: PANTRY INVENTORY ---
 with tab1:
     st.header("Current Pantry Inventory")
+    if st.session_state.pop("clear_add_item_form", False):
+        st.session_state.add_item_name = ""
+        st.session_state.add_item_amount = "1"
+        st.session_state.pop("barcode_last_code", None)
+    pending_product = st.session_state.pop("barcode_form_pending", None)
+    if pending_product:
+        apply_barcode_product_to_form(
+            pending_product,
+            pending_product.get("preferred_system") or preferred_system,
+        )
+    if "item_unit_system" not in st.session_state:
+        st.session_state.item_unit_system = preferred_system
+    if "add_item_name" not in st.session_state:
+        st.session_state.add_item_name = ""
+    if "add_item_category" not in st.session_state:
+        st.session_state.add_item_category = PANTRY_CATEGORIES[0]
+    if "add_item_amount" not in st.session_state:
+        st.session_state.add_item_amount = "1"
+
+    lookup_note = st.session_state.pop("barcode_lookup_message", None)
+    if lookup_note:
+        kind, text = lookup_note
+        if kind == "warning":
+            st.warning(text)
+        elif kind == "error":
+            st.error(text)
+        else:
+            st.success(text)
+    save_note = st.session_state.pop("pantry_save_message", None)
+    if save_note:
+        st.success(save_note)
+
+    with st.expander("Scan a barcode", expanded=bool(st.session_state.get("barcode_last_code"))):
+        st.caption(
+            "On iPhone, tap **Take photo or upload**, then **Take Photo**. That opens the real Camera app so you can zoom, use flash, and tap to focus. Fill the barcode, then Look up. Check the add form before saving."
+        )
+        with st.form("barcode_lookup_form", border=False):
+            typed_code = st.text_input("Barcode numbers", key="barcode_typed")
+            lookup_clicked = st.form_submit_button("Look up barcode")
+        upload = st.file_uploader(
+            "Take photo or upload",
+            type=["jpg", "jpeg", "png", "webp"],
+            key="barcode_upload",
+            help="On iPhone this offers Take Photo (full Camera app with zoom) or Photo Library.",
+        )
+        photo = None
+        if st.checkbox("In-page camera (desktop / quick snap, no zoom)", key="barcode_use_camera"):
+            photo = st.camera_input("In-page camera", key="barcode_camera")
+        image_file = photo or upload or st.session_state.get("barcode_camera") or st.session_state.get("barcode_upload")
+        if lookup_clicked:
+            barcode = pick_product_barcode([typed_code])
+            image_bytes = image_file.getvalue() if image_file else b""
+            mime_type = getattr(image_file, "type", None) if image_file else ""
+            lookup_system = st.session_state.get("item_unit_system") or preferred_system
+            if not barcode and image_bytes:
+                with st.spinner("Reading barcode..."):
+                    try:
+                        barcode = pick_product_barcode(decode_barcodes_from_image_bytes(image_bytes))
+                        if not barcode and gemini_key:
+                            barcode = extract_barcode_with_gemini(image_bytes, mime_type, gemini_key)
+                    except Exception:
+                        barcode = ""
+            if not barcode:
+                st.session_state.barcode_lookup_message = (
+                    "warning",
+                    "Could not read a barcode. Try a closer photo, better light, Look up again, or type the digits.",
+                )
+                st.rerun()
+            else:
+                try:
+                    with st.spinner(f"Looking up {barcode}..."):
+                        product = lookup_open_food_facts(barcode)
+                except Exception as e:
+                    product = None
+                    detail = str(e)
+                    if any(code in detail for code in ("502", "503", "504", "429")) or "Gateway" in detail:
+                        detail = "Open Food Facts was busy. Try Look up again."
+                    st.session_state.barcode_lookup_message = (
+                        "error",
+                        f"Could not look up that barcode: {detail}",
+                    )
+                if product is not None:
+                    product["preferred_system"] = lookup_system
+                    st.session_state.barcode_form_pending = product
+                    st.session_state.barcode_last_code = product.get("barcode") or barcode
+                    if product.get("name"):
+                        st.session_state.barcode_lookup_message = (
+                            "success",
+                            f"Found {product['name']} ({product.get('barcode')}). Check the form, then Add to Pantry.",
+                        )
+                    else:
+                        st.session_state.barcode_lookup_message = (
+                            "warning",
+                            f"Read barcode {barcode}, but Open Food Facts has no product name. Enter a name and add it.",
+                        )
+                st.rerun()
+
     col1, col2 = st.columns([1, 2])
 
     with col1:
         st.subheader("Add / Update Item")
-        if st.session_state.pop("clear_add_item_form", False):
-            st.session_state.add_item_name = ""
-            st.session_state.add_item_amount = "1"
-            st.session_state.pop("barcode_last_code", None)
-        pending_product = st.session_state.pop("barcode_form_pending", None)
-        if pending_product:
-            apply_barcode_product_to_form(
-                pending_product,
-                pending_product.get("preferred_system") or preferred_system,
-            )
-        if "item_unit_system" not in st.session_state:
-            st.session_state.item_unit_system = preferred_system
-        if "add_item_name" not in st.session_state:
-            st.session_state.add_item_name = ""
-        if "add_item_category" not in st.session_state:
-            st.session_state.add_item_category = PANTRY_CATEGORIES[0]
-        if "add_item_amount" not in st.session_state:
-            st.session_state.add_item_amount = "1"
         unit_system = st.radio(
             "Unit system:",
             ["Imperial", "Metric"],
@@ -2257,79 +2378,6 @@ with tab1:
             st.session_state.add_item_unit = default_unit
         if st.session_state.get("add_item_category") not in PANTRY_CATEGORIES:
             st.session_state.add_item_category = PANTRY_CATEGORIES[0]
-
-        lookup_note = st.session_state.pop("barcode_lookup_message", None)
-        if lookup_note:
-            kind, text = lookup_note
-            if kind == "warning":
-                st.warning(text)
-            elif kind == "error":
-                st.error(text)
-            else:
-                st.success(text)
-        save_note = st.session_state.pop("pantry_save_message", None)
-        if save_note:
-            st.success(save_note)
-
-        with st.expander("Scan a barcode", expanded=bool(st.session_state.get("barcode_last_code"))):
-            st.caption(
-                "Take a photo of the package barcode, or upload one. Open Food Facts fills the form; you still confirm before adding."
-            )
-            with st.form("barcode_lookup_form", border=False):
-                typed_code = st.text_input("Barcode numbers", key="barcode_typed")
-                lookup_clicked = st.form_submit_button("Look up barcode")
-            photo = None
-            if st.checkbox("Use camera", key="barcode_use_camera"):
-                photo = st.camera_input("Camera", key="barcode_camera")
-            upload = st.file_uploader(
-                "Or upload a barcode photo",
-                type=["jpg", "jpeg", "png", "webp"],
-                key="barcode_upload",
-            )
-            image_file = photo or upload or st.session_state.get("barcode_camera") or st.session_state.get("barcode_upload")
-            if lookup_clicked:
-                barcode = pick_product_barcode([typed_code])
-                image_bytes = image_file.getvalue() if image_file else b""
-                mime_type = getattr(image_file, "type", None) if image_file else ""
-                if not barcode and image_bytes:
-                    with st.spinner("Reading barcode..."):
-                        barcode = pick_product_barcode(decode_barcodes_from_image_bytes(image_bytes))
-                        if not barcode and gemini_key:
-                            barcode = extract_barcode_with_gemini(image_bytes, mime_type, gemini_key)
-                if not barcode:
-                    st.session_state.barcode_lookup_message = (
-                        "warning",
-                        "Could not read a barcode. Try a closer photo, better light, or type the digits.",
-                    )
-                    st.rerun()
-                else:
-                    try:
-                        with st.spinner(f"Looking up {barcode}..."):
-                            product = lookup_open_food_facts(barcode)
-                    except Exception as e:
-                        product = None
-                        detail = str(e)
-                        if any(code in detail for code in ("502", "503", "504", "429")) or "Gateway" in detail:
-                            detail = "Open Food Facts was busy. Try Look up again."
-                        st.session_state.barcode_lookup_message = (
-                            "error",
-                            f"Could not look up that barcode: {detail}",
-                        )
-                    if product is not None:
-                        product["preferred_system"] = unit_system
-                        st.session_state.barcode_form_pending = product
-                        st.session_state.barcode_last_code = product.get("barcode") or barcode
-                        if product.get("name"):
-                            st.session_state.barcode_lookup_message = (
-                                "success",
-                                f"Found {product['name']} ({product.get('barcode')}). Check the form, then Add to Pantry.",
-                            )
-                        else:
-                            st.session_state.barcode_lookup_message = (
-                                "warning",
-                                f"Read barcode {barcode}, but Open Food Facts has no product name. Enter a name and add it.",
-                            )
-                    st.rerun()
 
         with st.form("add_item_form"):
             new_item = st.text_input(
