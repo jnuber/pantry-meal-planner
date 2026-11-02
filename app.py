@@ -1722,6 +1722,49 @@ st.markdown(
         font-size: 0 !important;
         color: transparent !important;
       }}
+      .st-key-barcode_scan_card [data-testid="stExpander"] {{
+        background: linear-gradient(180deg, #d36a2d 0%, #c45c26 42%, #9a4018 100%);
+        border: 1px solid #7a3212 !important;
+        border-radius: 16px !important;
+        box-shadow: 0 8px 22px rgba(61, 43, 31, 0.2);
+        overflow: hidden;
+      }}
+      .st-key-barcode_scan_card [data-testid="stExpander"] details {{
+        background: transparent !important;
+      }}
+      .st-key-barcode_scan_card [data-testid="stExpander"] summary {{
+        background: rgba(61, 43, 31, 0.28) !important;
+      }}
+      .st-key-barcode_scan_card [data-testid="stExpander"] summary,
+      .st-key-barcode_scan_card [data-testid="stExpander"] summary p,
+      .st-key-barcode_scan_card [data-testid="stExpander"] summary span {{
+        color: #fffaf3 !important;
+        font-weight: 700 !important;
+      }}
+      .st-key-barcode_scan_card [data-testid="stCaptionContainer"] p,
+      .st-key-barcode_scan_card [data-testid="stMarkdown"] p,
+      .st-key-barcode_scan_card label,
+      .st-key-barcode_scan_card [data-testid="stWidgetLabel"] p {{
+        color: #fff6ea !important;
+      }}
+      .st-key-barcode_scan_card [data-testid="stTextInput"] input {{
+        background: #fffaf3 !important;
+        color: #3d2b1f !important;
+      }}
+      .st-key-barcode_scan_card button {{
+        background: #fffaf3 !important;
+        color: #c45c26 !important;
+        border: 1px solid #f0dcc8 !important;
+        font-weight: 700 !important;
+      }}
+      .st-key-barcode_lookup_status [data-testid="stSpinner"] {{
+        justify-content: flex-start !important;
+        align-items: center !important;
+      }}
+      .st-key-barcode_lookup_status [data-testid="stSpinner"] span,
+      .st-key-barcode_lookup_status p {{
+        color: #fffaf3 !important;
+      }}
       h1 {{
         font-size: 1.45rem !important;
         line-height: 1.25 !important;
@@ -2319,70 +2362,91 @@ with tab1:
     if save_note:
         st.success(save_note)
 
-    with st.expander("Scan a barcode", expanded=bool(st.session_state.get("barcode_last_code"))):
-        st.caption(
-            "On iPhone, tap **Take photo or upload**, then **Take Photo**. That opens the real Camera app so you can zoom, use flash, and tap to focus. Fill the barcode, then Look up. Check the add form before saving."
-        )
-        with st.form("barcode_lookup_form", border=False):
-            typed_code = st.text_input("Barcode numbers", key="barcode_typed")
-            lookup_clicked = st.form_submit_button("Look up barcode")
-        upload = st.file_uploader(
-            "Take photo or upload",
-            type=["jpg", "jpeg", "png", "webp", "heic", "heif"],
-            key="barcode_upload",
-            help="On iPhone this offers Take Photo (full Camera app with zoom) or Photo Library. iPhone photos in HEIC are converted automatically.",
-        )
-        photo = None
-        if st.checkbox("In-page camera (desktop / quick snap, no zoom)", key="barcode_use_camera"):
-            photo = st.camera_input("In-page camera", key="barcode_camera")
-        image_file = photo or upload or st.session_state.get("barcode_camera") or st.session_state.get("barcode_upload")
-        if lookup_clicked:
-            barcode = pick_product_barcode([typed_code])
-            image_bytes = image_file.getvalue() if image_file else b""
-            mime_type = getattr(image_file, "type", None) if image_file else ""
-            lookup_system = st.session_state.get("item_unit_system") or preferred_system
-            if not barcode and image_bytes:
-                with st.spinner("Reading barcode..."):
-                    try:
-                        barcode = pick_product_barcode(decode_barcodes_from_image_bytes(image_bytes))
-                        if not barcode and gemini_key:
-                            barcode = extract_barcode_with_gemini(image_bytes, mime_type, gemini_key)
-                    except Exception:
-                        barcode = ""
-            if not barcode:
-                st.session_state.barcode_lookup_message = (
-                    "warning",
-                    "Could not read a barcode. Try a closer photo, better light, Look up again, or type the digits.",
-                )
-                st.rerun()
-            else:
-                try:
-                    with st.spinner(f"Looking up {barcode}..."):
-                        product = lookup_open_food_facts(barcode)
-                except Exception as e:
-                    product = None
-                    detail = str(e)
-                    if any(code in detail for code in ("502", "503", "504", "429")) or "Gateway" in detail:
-                        detail = "Open Food Facts was busy. Try Look up again."
+    if (
+        st.session_state.get("barcode_upload")
+        or st.session_state.get("barcode_camera")
+        or st.session_state.get("barcode_last_code")
+        or st.session_state.get("barcode_lookup_busy")
+    ):
+        st.session_state.barcode_scan_open = True
+
+    with st.container(key="barcode_scan_card"):
+        with st.expander(
+            "Scan a barcode",
+            expanded=bool(st.session_state.get("barcode_scan_open")),
+            key="barcode_scan_expander",
+        ):
+            st.caption(
+                "On iPhone, tap **Take photo or upload**, then **Take Photo**. That opens the real Camera app so you can zoom, use flash, and tap to focus. Fill the barcode, then Look up. Check the add form before saving."
+            )
+            upload = st.file_uploader(
+                "Take photo or upload",
+                type=["jpg", "jpeg", "png", "webp", "heic", "heif"],
+                key="barcode_upload",
+                help="On iPhone this offers Take Photo (full Camera app with zoom) or Photo Library. iPhone photos in HEIC are converted automatically.",
+            )
+            photo = None
+            if st.checkbox("In-page camera (desktop / quick snap, no zoom)", key="barcode_use_camera"):
+                photo = st.camera_input("In-page camera", key="barcode_camera")
+            with st.form("barcode_lookup_form", border=False):
+                typed_code = st.text_input("Barcode numbers", key="barcode_typed")
+                button_col, status_col = st.columns([0.42, 0.58], vertical_alignment="center")
+                with button_col:
+                    lookup_clicked = st.form_submit_button("Look up barcode")
+                with status_col:
+                    with st.container(key="barcode_lookup_status"):
+                        lookup_status = st.empty()
+            image_file = photo or upload or st.session_state.get("barcode_camera") or st.session_state.get("barcode_upload")
+            if lookup_clicked:
+                st.session_state.barcode_scan_open = True
+                barcode = pick_product_barcode([typed_code])
+                image_bytes = image_file.getvalue() if image_file else b""
+                mime_type = getattr(image_file, "type", None) if image_file else ""
+                lookup_system = st.session_state.get("item_unit_system") or preferred_system
+                if not barcode and image_bytes:
+                    with lookup_status:
+                        with st.spinner("Reading barcode..."):
+                            try:
+                                barcode = pick_product_barcode(decode_barcodes_from_image_bytes(image_bytes))
+                                if not barcode and gemini_key:
+                                    barcode = extract_barcode_with_gemini(image_bytes, mime_type, gemini_key)
+                            except Exception:
+                                barcode = ""
+                if not barcode:
                     st.session_state.barcode_lookup_message = (
-                        "error",
-                        f"Could not look up that barcode: {detail}",
+                        "warning",
+                        "Could not read a barcode. Try a closer photo, better light, Look up again, or type the digits.",
                     )
-                if product is not None:
-                    product["preferred_system"] = lookup_system
-                    st.session_state.barcode_form_pending = product
-                    st.session_state.barcode_last_code = product.get("barcode") or barcode
-                    if product.get("name"):
+                    st.rerun()
+                else:
+                    try:
+                        with lookup_status:
+                            with st.spinner(f"Looking up {barcode}..."):
+                                product = lookup_open_food_facts(barcode)
+                    except Exception as e:
+                        product = None
+                        detail = str(e)
+                        if any(code in detail for code in ("502", "503", "504", "429")) or "Gateway" in detail:
+                            detail = "Open Food Facts was busy. Try Look up again."
                         st.session_state.barcode_lookup_message = (
-                            "success",
-                            f"Found {product['name']} ({product.get('barcode')}). Check the form, then Add to Pantry.",
+                            "error",
+                            f"Could not look up that barcode: {detail}",
                         )
-                    else:
-                        st.session_state.barcode_lookup_message = (
-                            "warning",
-                            f"Read barcode {barcode}, but Open Food Facts has no product name. Enter a name and add it.",
-                        )
-                st.rerun()
+                    if product is not None:
+                        product["preferred_system"] = lookup_system
+                        st.session_state.barcode_form_pending = product
+                        st.session_state.barcode_last_code = product.get("barcode") or barcode
+                        if product.get("name"):
+                            st.session_state.barcode_lookup_message = (
+                                "success",
+                                f"Found {product['name']} ({product.get('barcode')}). Check the form, then Add to Pantry.",
+                            )
+                        else:
+                            st.session_state.barcode_lookup_message = (
+                                "warning",
+                                f"Read barcode {barcode}, but Open Food Facts has no product name. Enter a name and add it.",
+                            )
+                    st.rerun()
 
     col1, col2 = st.columns([1, 2])
 
