@@ -1,4 +1,5 @@
 import html
+import io
 import json
 import re
 from pathlib import Path
@@ -12,7 +13,7 @@ from google import genai
 from google.genai import types
 from supabase import create_client, Client
 
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.7.0"
 
 DEFAULT_APPLIANCES = [
     "Air Fryer",
@@ -71,18 +72,18 @@ METRIC_UNITS = COUNT_UNITS + [
 ]
 
 PANTRY_CATEGORIES = [
-    "Produce",
-    "Meat & Seafood",
-    "Dairy & Refrigerated",
-    "Pantry Staples",
-    "Spices",
-    "Frozen",
-    "Oils, Vinegars & Condiments",
     "Baking & Cooking Staples",
     "Breakfast & Cereals",
     "Beverages & Coffee",
+    "Dairy & Refrigerated",
+    "Frozen",
     "Grains & Pastas",
-]
+    "Meat & Seafood",
+    "Oils, Vinegars & Condiments",
+    "Pantry Staples",
+    "Produce",
+    "Spices",
+   ]
 
 MEAL_TYPES = [
     "Breakfast",
@@ -148,7 +149,8 @@ UNIT_ALIASES = {
 
 
 def units_for_system(system):
-    return IMPERIAL_UNITS if system == "Imperial" else METRIC_UNITS
+    units = IMPERIAL_UNITS if system == "Imperial" else METRIC_UNITS
+    return sorted(units, key=str.casefold)
 
 
 def normalize_unit(unit):
@@ -169,6 +171,41 @@ def format_quantity(amount, unit):
     return " ".join(part for part in (amount_text, unit_text) if part).strip()
 
 
+BARCODE_CATEGORY_HINTS = (
+    ("meat", "Meat & Seafood"),
+    ("seafood", "Meat & Seafood"),
+    ("fish", "Meat & Seafood"),
+    ("poultry", "Meat & Seafood"),
+    ("dairy", "Dairy & Refrigerated"),
+    ("cheese", "Dairy & Refrigerated"),
+    ("yogurt", "Dairy & Refrigerated"),
+    ("milk", "Dairy & Refrigerated"),
+    ("egg", "Dairy & Refrigerated"),
+    ("frozen", "Frozen"),
+    ("spice", "Spices"),
+    ("seasoning", "Spices"),
+    ("oil", "Oils, Vinegars & Condiments"),
+    ("vinegar", "Oils, Vinegars & Condiments"),
+    ("sauce", "Oils, Vinegars & Condiments"),
+    ("condiment", "Oils, Vinegars & Condiments"),
+    ("cereal", "Breakfast & Cereals"),
+    ("breakfast", "Breakfast & Cereals"),
+    ("coffee", "Beverages & Coffee"),
+    ("tea", "Beverages & Coffee"),
+    ("beverage", "Beverages & Coffee"),
+    ("drink", "Beverages & Coffee"),
+    ("pasta", "Grains & Pastas"),
+    ("rice", "Grains & Pastas"),
+    ("grain", "Grains & Pastas"),
+    ("flour", "Baking & Cooking Staples"),
+    ("sugar", "Baking & Cooking Staples"),
+    ("baking", "Baking & Cooking Staples"),
+    ("fruit", "Produce"),
+    ("vegetable", "Produce"),
+    ("produce", "Produce"),
+)
+
+
 def parse_quantity(raw):
     text = " ".join(str(raw or "").strip().split())
     if not text:
@@ -180,6 +217,166 @@ def parse_quantity(raw):
         amount, unit = "1", text
     unit = normalize_unit(unit) or "each"
     return amount, unit, detect_unit_system(unit)
+
+
+def _normalize_barcode_digits(text):
+    digits = re.sub(r"\D", "", str(text or ""))
+    if len(digits) in (8, 12, 13, 14):
+        return digits
+    return ""
+
+
+def pick_product_barcode(texts):
+    found = []
+    for text in texts or []:
+        digits = _normalize_barcode_digits(text)
+        if digits:
+            found.append(digits)
+        else:
+            match = re.search(r"\b(\d{8}|\d{12}|\d{13}|\d{14})\b", str(text or ""))
+            if match:
+                found.append(match.group(1))
+    if not found:
+        return ""
+    return max(found, key=len)
+
+
+def guess_pantry_category(text):
+    haystack = (text or "").casefold()
+    for needle, category in BARCODE_CATEGORY_HINTS:
+        if needle in haystack and category in PANTRY_CATEGORIES:
+            return category
+    return PANTRY_CATEGORIES[0]
+
+
+def parse_off_quantity(text, preferred_system):
+    cleaned = re.sub(r"\be\b", " ", str(text or ""), flags=re.I)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if not cleaned:
+        default_unit = "oz" if preferred_system == "Imperial" else "g"
+        return "1", default_unit, preferred_system
+    amount, unit, system = parse_quantity(cleaned)
+    unit = normalize_unit(unit.split()[0] if unit else "")
+    choices = units_for_system(system)
+    if unit not in choices:
+        unit = "oz" if system == "Imperial" else "g"
+        if unit not in choices:
+            unit = choices[0]
+    return amount, unit, system
+
+
+def decode_barcodes_from_image_bytes(image_bytes):
+    try:
+        from PIL import Image, ImageOps
+        import zxingcpp
+    except ImportError:
+        return []
+    try:
+        image = Image.open(io.BytesIO(image_bytes))
+        image = ImageOps.exif_transpose(image)
+    except Exception:
+        return []
+    if image.mode not in ("RGB", "L"):
+        image = image.convert("RGB")
+    seen = []
+    frames = [image, image.convert("L")]
+    if max(image.size) < 900:
+        frames.append(image.resize((image.width * 2, image.height * 2)))
+    for frame in frames:
+        for candidate in (frame, frame.rotate(90, expand=True)):
+            try:
+                results = zxingcpp.read_barcodes(candidate) or []
+            except Exception:
+                continue
+            for result in results:
+                text = str(getattr(result, "text", "") or "").strip()
+                if text and text not in seen:
+                    seen.append(text)
+            if seen:
+                return seen
+    return seen
+
+
+def extract_barcode_with_gemini(image_bytes, mime_type, gemini_key):
+    if not gemini_key:
+        return ""
+    client = genai.Client(api_key=gemini_key)
+    response = client.models.generate_content(
+        model="gemini-3.8-flash",
+        contents=[
+            types.Part.from_bytes(data=image_bytes, mime_type=mime_type or "image/jpeg"),
+            'Read the UPC or EAN barcode number on this package. JSON only: {"barcode":"digits"}. If none, {"barcode":""}.',
+        ],
+        config=types.GenerateContentConfig(
+            max_output_tokens=128,
+            response_mime_type="application/json",
+            thinking_config=types.ThinkingConfig(thinking_level=types.ThinkingLevel.LOW),
+        ),
+    )
+    payload = (response.text or "").strip()
+    try:
+        data = json.loads(payload)
+        if isinstance(data, dict):
+            return pick_product_barcode([data.get("barcode") or data.get("upc") or ""])
+    except (json.JSONDecodeError, TypeError, ValueError):
+        pass
+    return pick_product_barcode([payload])
+
+
+def lookup_open_food_facts(barcode):
+    code = pick_product_barcode([barcode])
+    if not code:
+        return None
+    response = requests.get(
+        f"https://world.openfoodfacts.org/api/v2/product/{code}.json",
+        headers={"User-Agent": f"PantryChef/{APP_VERSION} (household meal planner)"},
+        timeout=12,
+    )
+    response.raise_for_status()
+    data = response.json() or {}
+    product = data.get("product") if data.get("status") == 1 else None
+    if not product:
+        return {"barcode": code, "name": "", "category": PANTRY_CATEGORIES[0], "quantity": "", "source": "Open Food Facts"}
+    name = (
+        product.get("product_name")
+        or product.get("product_name_en")
+        or product.get("generic_name")
+        or product.get("brands")
+        or ""
+    )
+    hint = " ".join(
+        part
+        for part in (
+            name,
+            product.get("generic_name") or "",
+            product.get("categories") or "",
+            " ".join(product.get("categories_tags") or []),
+        )
+        if part
+    )
+    return {
+        "barcode": code,
+        "name": " ".join(str(name).split()).strip(),
+        "category": guess_pantry_category(hint),
+        "quantity": product.get("quantity") or product.get("product_quantity") or "",
+        "source": "Open Food Facts",
+    }
+
+
+def apply_barcode_product_to_form(product, preferred_system):
+    product = product or {}
+    name = " ".join(str(product.get("name") or "").split()).strip()
+    if name:
+        st.session_state.add_item_name = name.title()
+    category = product.get("category")
+    if category in PANTRY_CATEGORIES:
+        st.session_state.add_item_category = category
+    amount, unit, system = parse_off_quantity(product.get("quantity"), preferred_system)
+    if system in ("Imperial", "Metric"):
+        st.session_state.item_unit_system = system
+    st.session_state.add_item_amount = str(amount)
+    choices = units_for_system(system)
+    st.session_state.add_item_unit = unit if unit in choices else choices[0]
 
 
 NUTRITION_DISCLAIMER = (
@@ -1121,12 +1318,20 @@ def fetch_inventory_df():
     response = (
         supabase.table("pantry_inventory")
         .select("*")
-        .order("category")
         .order("ingredient_name")
         .execute()
     )
     records = inventory_records(response.data)
-    return pd.DataFrame(records)
+    df = pd.DataFrame(records)
+    if df.empty or "item" not in df.columns:
+        return df
+    ordered = df.copy()
+    ordered["_item_sort"] = ordered["item"].astype(str).str.casefold()
+    if "unit" in ordered.columns:
+        ordered["_unit_sort"] = ordered["unit"].astype(str).str.casefold()
+        ordered = ordered.sort_values(["_item_sort", "_unit_sort"], kind="mergesort")
+        return ordered.drop(columns=["_item_sort", "_unit_sort"])
+    return ordered.sort_values("_item_sort", kind="mergesort").drop(columns=["_item_sort"])
 
 
 def upsert_inventory_item(name, category, amount_value, unit_value, unit_system):
@@ -1383,7 +1588,7 @@ Pantry Chef turns what you already have on hand into meal ideas. Work left to ri
 - **Measurement system:** Imperial or Metric is the default for new pantry items. You can still change units on each item.
 
 ### Pantry Inventory
-Add an ingredient name, category, amount, and unit. Choosing **Imperial** or **Metric** on the item switches the unit list (`oz` / `lb` / `cup` versus `g` / `kg` / `ml`). Click a row in **Items on Hand** to edit any field except the row number, then save. Adding an existing name also updates that item. Use **Delete Selected Item** to remove something you used up.
+Add an ingredient name, category, amount, and unit. Choosing **Imperial** or **Metric** on the item switches the unit list (`oz` / `lb` / `cup` versus `g` / `kg` / `ml`). **Scan a barcode** uses the camera or a photo of a UPC/EAN, looks the package up in Open Food Facts, then fills the add form — check the name and amount before you add. You can also type the barcode digits. Click a row in **Items on Hand** to edit any field except the row number, then save. Adding an existing name also updates that item. Use **Delete Selected Item** to remove something you used up.
 
 ### Recipe Generator
 Choose a **meal type** (Dinner, Breakfast, Soup, or type your own). Then pick pantry items to cook with — nothing is pre-selected. Add an optional craving, then generate ideas. The chef looks for that meal type using what you chose and usually returns **two short** recipes (capped length so it stays quick).
@@ -2001,29 +2206,117 @@ with tab1:
 
     with col1:
         st.subheader("Add / Update Item")
+        pending_product = st.session_state.pop("barcode_form_pending", None)
+        if pending_product:
+            apply_barcode_product_to_form(
+                pending_product,
+                pending_product.get("preferred_system") or preferred_system,
+            )
         if "item_unit_system" not in st.session_state:
             st.session_state.item_unit_system = preferred_system
+        if "add_item_name" not in st.session_state:
+            st.session_state.add_item_name = ""
+        if "add_item_category" not in st.session_state:
+            st.session_state.add_item_category = PANTRY_CATEGORIES[0]
+        if "add_item_amount" not in st.session_state:
+            st.session_state.add_item_amount = "1"
         unit_system = st.radio(
             "Unit system:",
             ["Imperial", "Metric"],
             key="item_unit_system",
             horizontal=True,
         )
+        unit_choices = units_for_system(unit_system)
+        default_unit = "oz" if unit_system == "Imperial" else "g"
+        if default_unit not in unit_choices:
+            default_unit = unit_choices[0]
+        if st.session_state.get("add_item_unit") not in unit_choices:
+            st.session_state.add_item_unit = default_unit
+        if st.session_state.get("add_item_category") not in PANTRY_CATEGORIES:
+            st.session_state.add_item_category = PANTRY_CATEGORIES[0]
+
+        lookup_note = st.session_state.pop("barcode_lookup_message", None)
+        if lookup_note:
+            kind, text = lookup_note
+            if kind == "warning":
+                st.warning(text)
+            elif kind == "error":
+                st.error(text)
+            else:
+                st.success(text)
+
+        with st.expander("Scan a barcode", expanded=bool(st.session_state.get("barcode_last_code"))):
+            st.caption(
+                "Take a photo of the package barcode, or upload one. Open Food Facts fills the form; you still confirm before adding."
+            )
+            with st.form("barcode_lookup_form", border=False):
+                typed_code = st.text_input("Barcode numbers", key="barcode_typed")
+                lookup_clicked = st.form_submit_button("Look up barcode")
+            photo = None
+            if st.checkbox("Use camera", key="barcode_use_camera"):
+                photo = st.camera_input("Camera", key="barcode_camera")
+            upload = st.file_uploader(
+                "Or upload a barcode photo",
+                type=["jpg", "jpeg", "png", "webp"],
+                key="barcode_upload",
+            )
+            image_file = photo or upload or st.session_state.get("barcode_camera") or st.session_state.get("barcode_upload")
+            if lookup_clicked:
+                barcode = pick_product_barcode([typed_code])
+                image_bytes = image_file.getvalue() if image_file else b""
+                mime_type = getattr(image_file, "type", None) if image_file else ""
+                if not barcode and image_bytes:
+                    with st.spinner("Reading barcode..."):
+                        barcode = pick_product_barcode(decode_barcodes_from_image_bytes(image_bytes))
+                        if not barcode and gemini_key:
+                            barcode = extract_barcode_with_gemini(image_bytes, mime_type, gemini_key)
+                if not barcode:
+                    st.session_state.barcode_lookup_message = (
+                        "warning",
+                        "Could not read a barcode. Try a closer photo, better light, or type the digits.",
+                    )
+                    st.rerun()
+                else:
+                    try:
+                        with st.spinner(f"Looking up {barcode}..."):
+                            product = lookup_open_food_facts(barcode)
+                    except Exception as e:
+                        product = None
+                        st.session_state.barcode_lookup_message = (
+                            "error",
+                            f"Could not look up that barcode: {e}",
+                        )
+                    if product is not None:
+                        product["preferred_system"] = unit_system
+                        st.session_state.barcode_form_pending = product
+                        st.session_state.barcode_last_code = product.get("barcode") or barcode
+                        if product.get("name"):
+                            st.session_state.barcode_lookup_message = (
+                                "success",
+                                f"Found {product['name']} ({product.get('barcode')}). Check the form, then Add to Pantry.",
+                            )
+                        else:
+                            st.session_state.barcode_lookup_message = (
+                                "warning",
+                                f"Read barcode {barcode}, but Open Food Facts has no product name. Enter a name and add it.",
+                            )
+                    st.rerun()
+
         with st.form("add_item_form"):
-            new_item = st.text_input("Ingredient Name (e.g., Chicken Breast, Rice, Eggs):")
+            new_item = st.text_input(
+                "Ingredient Name (e.g., Chicken Breast, Rice, Eggs):",
+                key="add_item_name",
+            )
             category = st.selectbox(
                 "Category:",
                 PANTRY_CATEGORIES,
+                key="add_item_category",
             )
             amount_col, unit_col = st.columns(2)
             with amount_col:
-                amount = st.text_input("Amount:", value="1")
+                amount = st.text_input("Amount:", key="add_item_amount")
             with unit_col:
-                unit_choices = units_for_system(unit_system)
-                default_unit = "oz" if unit_system == "Imperial" else "g"
-                if default_unit not in unit_choices:
-                    default_unit = unit_choices[0]
-                unit = st.selectbox("Unit:", unit_choices, index=unit_choices.index(default_unit))
+                unit = st.selectbox("Unit:", unit_choices, key="add_item_unit")
             submitted = st.form_submit_button("Add to Pantry")
 
             if submitted and new_item:
@@ -2038,6 +2331,8 @@ with tab1:
                         unit_value,
                         unit_system,
                     )
+                    st.session_state.add_item_name = ""
+                    st.session_state.add_item_amount = "1"
                     st.success(f"Added '{new_item}' ({quantity}) to pantry!")
                     st.rerun()
                 except Exception as e:
@@ -2117,8 +2412,6 @@ with tab2:
 
     try:
         df_pantry = fetch_inventory_df()
-        if not df_pantry.empty:
-            df_pantry = df_pantry.sort_values("item")
     except Exception as e:
         df_pantry = pd.DataFrame()
         st.error(f"Could not load pantry ingredients: {e}")
