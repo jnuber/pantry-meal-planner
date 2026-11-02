@@ -5,3 +5,4 @@ pandas
 requests
 fpdf2
 zxing-cpp
+pillow-heif

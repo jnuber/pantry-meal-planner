@@ -266,16 +266,31 @@ def parse_off_quantity(text, preferred_system):
     return amount, unit, system
 
 
-def _barcode_image_from_bytes(image_bytes):
-    from PIL import Image, ImageOps
+def _register_heif_opener():
+    try:
+        from pillow_heif import register_heif_opener
 
+        register_heif_opener()
+    except Exception:
+        pass
+
+
+def _barcode_image_from_bytes(image_bytes):
+    from PIL import Image, ImageFile, ImageOps
+
+    ImageFile.LOAD_TRUNCATED_IMAGES = True
+    _register_heif_opener()
     image = Image.open(io.BytesIO(image_bytes))
     image = ImageOps.exif_transpose(image)
     if image.mode not in ("RGB", "L"):
         image = image.convert("RGB")
-    max_edge = 1800
-    if max(image.size) > max_edge:
-        image.thumbnail((max_edge, max_edge))
+    width, height = image.size
+    long_edge = max(width, height)
+    if long_edge < 1200:
+        scale = 1600 / long_edge
+        image = image.resize((int(width * scale), int(height * scale)), Image.Resampling.LANCZOS)
+    elif long_edge > 2200:
+        image.thumbnail((2200, 2200))
     return image
 
 
@@ -295,7 +310,7 @@ def _jpeg_bytes_for_lookup(image_bytes):
 
 def decode_barcodes_from_image_bytes(image_bytes):
     try:
-        from PIL import ImageOps
+        from PIL import ImageEnhance, ImageFilter, ImageOps
         import zxingcpp
     except ImportError:
         return []
@@ -303,16 +318,31 @@ def decode_barcodes_from_image_bytes(image_bytes):
         image = _barcode_image_from_bytes(image_bytes)
     except Exception:
         return []
-    seen = []
     gray = ImageOps.autocontrast(image.convert("L"))
-    frames = [image, gray]
-    if max(image.size) < 900:
-        frames.append(image.resize((image.width * 2, image.height * 2)))
+    sharp = gray.filter(ImageFilter.UnsharpMask(radius=1.5, percent=160, threshold=2))
+    contrast = ImageEnhance.Contrast(gray).enhance(2.2)
+    frames = [gray, sharp, contrast]
+    formats = getattr(zxingcpp, "AllRetail", None) or getattr(zxingcpp, "EANUPC", None)
+    binarizers = [
+        getattr(zxingcpp, "LocalAverage", None),
+        getattr(zxingcpp, "GlobalHistogram", None),
+        getattr(zxingcpp, "FixedThreshold", None),
+    ]
+    binarizers = [item for item in binarizers if item is not None] or [None]
+    seen = []
     for frame in frames:
-        for angle in (0, 90, 180, 270):
-            candidate = frame if angle == 0 else frame.rotate(angle, expand=True)
+        for binarizer in binarizers:
+            options = {
+                "try_rotate": True,
+                "try_downscale": True,
+                "try_invert": True,
+            }
+            if formats is not None:
+                options["formats"] = formats
+            if binarizer is not None:
+                options["binarizer"] = binarizer
             try:
-                results = zxingcpp.read_barcodes(candidate) or []
+                results = zxingcpp.read_barcodes(frame, **options) or []
             except Exception:
                 continue
             for result in results:
@@ -329,35 +359,29 @@ def extract_barcode_with_gemini(image_bytes, mime_type, gemini_key):
         return ""
     payload_bytes = _jpeg_bytes_for_lookup(image_bytes)
     client = genai.Client(api_key=gemini_key)
-    last_error = None
-    for attempt in range(3):
-        try:
-            response = client.models.generate_content(
-                model="gemini-3.8-flash",
-                contents=[
-                    types.Part.from_bytes(data=payload_bytes, mime_type="image/jpeg"),
-                    'Read the UPC or EAN barcode number on this package. JSON only: {"barcode":"digits"}. If none, {"barcode":""}.',
-                ],
-                config=types.GenerateContentConfig(
-                    max_output_tokens=128,
-                    response_mime_type="application/json",
-                    thinking_config=types.ThinkingConfig(thinking_level=types.ThinkingLevel.LOW),
-                ),
-            )
-            payload = (response.text or "").strip()
-            try:
-                data = json.loads(payload)
-                if isinstance(data, dict):
-                    return pick_product_barcode([data.get("barcode") or data.get("upc") or ""])
-            except (json.JSONDecodeError, TypeError, ValueError):
-                pass
-            return pick_product_barcode([payload])
-        except Exception as error:
-            last_error = error
-            time.sleep(0.6 * (attempt + 1))
-    if last_error:
-        raise last_error
-    return ""
+    try:
+        response = client.models.generate_content(
+            model="gemini-3.8-flash",
+            contents=[
+                types.Part.from_bytes(data=payload_bytes, mime_type="image/jpeg"),
+                'Read the UPC or EAN barcode number on this package. JSON only: {"barcode":"digits"}. If none, {"barcode":""}.',
+            ],
+            config=types.GenerateContentConfig(
+                max_output_tokens=128,
+                response_mime_type="application/json",
+                thinking_config=types.ThinkingConfig(thinking_level=types.ThinkingLevel.LOW),
+            ),
+        )
+    except Exception:
+        return ""
+    payload = (response.text or "").strip()
+    try:
+        data = json.loads(payload)
+        if isinstance(data, dict):
+            return pick_product_barcode([data.get("barcode") or data.get("upc") or ""])
+    except (json.JSONDecodeError, TypeError, ValueError):
+        pass
+    return pick_product_barcode([payload])
 
 
 def lookup_open_food_facts(barcode):
@@ -2304,9 +2328,9 @@ with tab1:
             lookup_clicked = st.form_submit_button("Look up barcode")
         upload = st.file_uploader(
             "Take photo or upload",
-            type=["jpg", "jpeg", "png", "webp"],
+            type=["jpg", "jpeg", "png", "webp", "heic", "heif"],
             key="barcode_upload",
-            help="On iPhone this offers Take Photo (full Camera app with zoom) or Photo Library.",
+            help="On iPhone this offers Take Photo (full Camera app with zoom) or Photo Library. iPhone photos in HEIC are converted automatically.",
         )
         photo = None
         if st.checkbox("In-page camera (desktop / quick snap, no zoom)", key="barcode_use_camera"):
