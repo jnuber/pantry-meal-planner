@@ -2,6 +2,7 @@ import html
 import io
 import json
 import re
+import time
 from pathlib import Path
 from urllib.parse import quote
 
@@ -327,12 +328,30 @@ def lookup_open_food_facts(barcode):
     code = pick_product_barcode([barcode])
     if not code:
         return None
-    response = requests.get(
-        f"https://world.openfoodfacts.org/api/v2/product/{code}.json",
-        headers={"User-Agent": f"PantryChef/{APP_VERSION} (household meal planner)"},
-        timeout=12,
-    )
-    response.raise_for_status()
+    url = f"https://world.openfoodfacts.org/api/v2/product/{code}.json"
+    headers = {"User-Agent": f"PantryChef/{APP_VERSION} (household meal planner)"}
+    response = None
+    last_error = None
+    for attempt in range(3):
+        try:
+            response = requests.get(url, headers=headers, timeout=12)
+            if response.status_code in (429, 502, 503, 504):
+                last_error = requests.HTTPError(
+                    f"{response.status_code} Server Error: {response.reason} for url: {url}",
+                    response=response,
+                )
+                time.sleep(0.7 * (attempt + 1))
+                continue
+            response.raise_for_status()
+            break
+        except (requests.Timeout, requests.ConnectionError) as error:
+            last_error = error
+            time.sleep(0.7 * (attempt + 1))
+    else:
+        if last_error:
+            raise last_error
+    if response is None:
+        raise last_error or RuntimeError("Barcode lookup did not return a response.")
     data = response.json() or {}
     product = data.get("product") if data.get("status") == 1 else None
     if not product:
@@ -2206,6 +2225,10 @@ with tab1:
 
     with col1:
         st.subheader("Add / Update Item")
+        if st.session_state.pop("clear_add_item_form", False):
+            st.session_state.add_item_name = ""
+            st.session_state.add_item_amount = "1"
+            st.session_state.pop("barcode_last_code", None)
         pending_product = st.session_state.pop("barcode_form_pending", None)
         if pending_product:
             apply_barcode_product_to_form(
@@ -2244,6 +2267,9 @@ with tab1:
                 st.error(text)
             else:
                 st.success(text)
+        save_note = st.session_state.pop("pantry_save_message", None)
+        if save_note:
+            st.success(save_note)
 
         with st.expander("Scan a barcode", expanded=bool(st.session_state.get("barcode_last_code"))):
             st.caption(
@@ -2282,9 +2308,12 @@ with tab1:
                             product = lookup_open_food_facts(barcode)
                     except Exception as e:
                         product = None
+                        detail = str(e)
+                        if any(code in detail for code in ("502", "503", "504", "429")) or "Gateway" in detail:
+                            detail = "Open Food Facts was busy. Try Look up again."
                         st.session_state.barcode_lookup_message = (
                             "error",
-                            f"Could not look up that barcode: {e}",
+                            f"Could not look up that barcode: {detail}",
                         )
                     if product is not None:
                         product["preferred_system"] = unit_system
@@ -2331,9 +2360,8 @@ with tab1:
                         unit_value,
                         unit_system,
                     )
-                    st.session_state.add_item_name = ""
-                    st.session_state.add_item_amount = "1"
-                    st.success(f"Added '{new_item}' ({quantity}) to pantry!")
+                    st.session_state.pantry_save_message = f"Added '{new_item}' ({quantity}) to pantry!"
+                    st.session_state.clear_add_item_form = True
                     st.rerun()
                 except Exception as e:
                     st.error(f"Could not save pantry item: {e}")
