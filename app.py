@@ -1667,7 +1667,16 @@ Pantry Chef turns what you already have on hand into meal ideas. Work left to ri
 - **Measurement system:** Imperial or Metric is the default for new pantry items. You can still change units on each item.
 
 ### Pantry Inventory
-Add an ingredient name, category, amount, and unit. Choosing **Imperial** or **Metric** on the item switches the unit list (`oz` / `lb` / `cup` versus `g` / `kg` / `ml`). **Scan a barcode** looks up a UPC/EAN in Open Food Facts and fills the add form — check the name and amount before you add. On iPhone, tap **Take photo or upload**, then **Take Photo** so you get the full Camera app (zoom, flash, tap to focus). The in-page camera is a small browser preview without those controls. You can also type the barcode digits. Click a row in **Items on Hand** to edit any field except the row number, then save. Adding an existing name also updates that item. Use **Delete Selected Item** to remove something you used up.
+Add an ingredient name, category, amount, and unit. Choosing **Imperial** or **Metric** on the item switches the unit list (`oz` / `lb` / `cup` versus `g` / `kg` / `ml`). Click a row in **Items on Hand** to edit any field except the row number, then save. Adding an existing name also updates that item. Use **Delete Selected Item** to remove something you used up.
+
+### Scan a barcode
+The burnt-orange **Scan a barcode** card looks up a UPC/EAN in Open Food Facts and fills the add form. Check the name, category, and amount, then **Add to Pantry**. Names come from a public product catalog — sometimes you get the brand instead of the product (for example “Hidden Valley” instead of “Ranch Mix”). Edit the name before you save.
+
+**On iPhone (best picture):** tap **Take photo or upload**, then **Take Photo** or pick from **Photo Library**. **Take Photo** opens the real iPhone Camera app, so you can zoom, use flash, and tap to focus on the barcode. After the photo is attached, tap **Look up barcode**. The status spinner sits to the right of that button. The scan card stays open after you upload.
+
+**In-page camera:** the checkbox **In-page camera (desktop / quick snap, no zoom)** is a small browser preview. It does **not** use iPhone camera modes (no zoom, flash, or tap-to-focus). Use it on a computer webcam, or skip it on the phone.
+
+**Type the digits:** if the photo will not read, enter the numbers under the barcode and Look up. Hold the package so the bars are sharp, well lit, and fill most of the frame.
 
 ### Recipe Generator
 Choose a **meal type** (Dinner, Breakfast, Soup, or type your own). Then pick pantry items to cook with — nothing is pre-selected. Add an optional craving, then generate ideas. The chef looks for that meal type using what you chose and usually returns **two short** recipes (capped length so it stays quick).
@@ -1681,6 +1690,7 @@ Favorites are stored in Supabase, one entry per recipe. Sort the list by **name*
 - Be specific in the extra prompt (“air fryer, high protein”) so the chef stays inside your appliances and diet.
 - Keep amounts up to date so generated recipes know how much you actually have.
 - If generation fails, confirm the Gemini key or that Ollama is running.
+- If a barcode lookup is slow or fails, try Look up again, or type the numbers. Open Food Facts is sometimes busy.
 """
 
 CHEF_HELP_ICON = (
