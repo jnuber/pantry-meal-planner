@@ -14,7 +14,7 @@ from google import genai
 from google.genai import types
 from supabase import create_client, Client
 
-APP_VERSION = "1.7.1"
+APP_VERSION = "1.7.2"
 
 DEFAULT_APPLIANCES = [
     "Air Fryer",
@@ -154,6 +154,36 @@ def units_for_system(system):
     return sorted(units, key=str.casefold)
 
 
+def default_unit_for_system(system):
+    return "oz" if system == "Imperial" else "g"
+
+
+def add_item_unit_key(system):
+    return f"add_item_unit_{system or 'Imperial'}"
+
+
+def sync_unit_widget(key, system):
+    choices = units_for_system(system)
+    default_unit = default_unit_for_system(system)
+    if st.session_state.get(key) not in choices:
+        st.session_state[key] = default_unit if default_unit in choices else choices[0]
+
+
+def _on_pref_unit_system_change():
+    system = st.session_state.get("pref_unit_system") or "Imperial"
+    st.session_state.item_unit_system = system
+    sync_unit_widget(add_item_unit_key(system), system)
+
+
+def _on_item_unit_system_change():
+    system = st.session_state.get("item_unit_system") or "Imperial"
+    sync_unit_widget(add_item_unit_key(system), system)
+
+
+def _on_edit_unit_system_change():
+    sync_unit_widget("edit_pantry_unit", st.session_state.get("edit_pantry_system") or "Imperial")
+
+
 def normalize_unit(unit):
     cleaned = " ".join((unit or "").strip().split())
     return UNIT_ALIASES.get(cleaned.lower(), cleaned)
@@ -254,13 +284,13 @@ def parse_off_quantity(text, preferred_system):
     cleaned = re.sub(r"\be\b", " ", str(text or ""), flags=re.I)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     if not cleaned:
-        default_unit = "oz" if preferred_system == "Imperial" else "g"
+        default_unit = default_unit_for_system(preferred_system)
         return "1", default_unit, preferred_system
     amount, unit, system = parse_quantity(cleaned)
     unit = normalize_unit(unit.split()[0] if unit else "")
     choices = units_for_system(system)
     if unit not in choices:
-        unit = "oz" if system == "Imperial" else "g"
+        unit = default_unit_for_system(system)
         if unit not in choices:
             unit = choices[0]
     return amount, unit, system
@@ -550,7 +580,10 @@ def apply_barcode_product_to_form(product, preferred_system):
         st.session_state.item_unit_system = system
     st.session_state.add_item_amount = str(amount)
     choices = units_for_system(system)
-    st.session_state.add_item_unit = unit if unit in choices else choices[0]
+    fallback = default_unit_for_system(system)
+    chosen = unit if unit in choices else (fallback if fallback in choices else choices[0])
+    st.session_state.add_item_unit = chosen
+    st.session_state[add_item_unit_key(system)] = chosen
 
 
 NUTRITION_DISCLAIMER = (
@@ -1762,7 +1795,7 @@ Pantry Chef turns what you already have on hand into meal ideas. Work left to ri
 - **Measurement system:** Imperial or Metric is the default for new pantry items. You can still change units on each item.
 
 ### Pantry Inventory
-Add an ingredient name, category, amount, and unit. Choosing **Imperial** or **Metric** on the item switches the unit list (`oz` / `lb` / `cup` versus `g` / `kg` / `ml`). Click a row in **Items on Hand** to edit any field except the row number, then save. Adding an existing name also updates that item. Use **Delete Selected Item** to remove something you used up.
+Add an ingredient name, category, amount, and unit. Choosing **Imperial** or **Metric** on the item switches the unit list (`oz` / `lb` / `cup` versus `g` / `kg` / `ml`). Click a row in **Items on Hand** to edit any field except the row number, then save. Filter that table by item, category, amount, or unit. Adding an existing name also updates that item. Use **Delete selected item** to remove something you used up.
 
 ### Scan a barcode
 The burnt-orange **Scan a barcode** card looks up a UPC/EAN in Open Food Facts first, then UPCitemdb if that catalog has no name, and fills the add form. Check the name, category, and amount, then **Add to Pantry**. Names come from public catalogs — sometimes you get the brand instead of the product (for example “Hidden Valley” instead of “Ranch Mix”). Edit the name before you save. Official GS1 US lookup is a paid business API, so the app does not call gs1us.org.
@@ -2028,15 +2061,19 @@ def edit_inventory_dialog():
     st.caption("Update any field except the table index, then save.")
     name = st.text_input("Ingredient Name:", key="edit_pantry_name")
     category = st.selectbox("Category:", PANTRY_CATEGORIES, key="edit_pantry_category")
-    unit_system = st.radio("Unit system:", ["Imperial", "Metric"], horizontal=True, key="edit_pantry_system")
+    unit_system = st.radio(
+        "Unit system:",
+        ["Imperial", "Metric"],
+        horizontal=True,
+        key="edit_pantry_system",
+        on_change=_on_edit_unit_system_change,
+    )
     amount_col, unit_col = st.columns(2)
     with amount_col:
         amount = st.text_input("Amount:", key="edit_pantry_amount")
     with unit_col:
         unit_choices = units_for_system(unit_system)
-        current_unit = st.session_state.get("edit_pantry_unit")
-        if current_unit not in unit_choices:
-            st.session_state.edit_pantry_unit = unit_choices[0]
+        sync_unit_widget("edit_pantry_unit", unit_system)
         unit = st.selectbox("Unit:", unit_choices, key="edit_pantry_unit")
 
     save_col, cancel_col = st.columns(2)
@@ -2423,7 +2460,8 @@ preferred_system = st.sidebar.radio(
     ["Imperial", "Metric"],
     horizontal=True,
     key="pref_unit_system",
-    help="Used as the default for new pantry items. You can still pick units per item.",
+    help="Sets the unit list for new pantry items. Metric shows ml, L, g, kg.",
+    on_change=_on_pref_unit_system_change,
 )
 servings = st.sidebar.number_input("Number of Servings:", min_value=1, max_value=12, value=4)
 st.sidebar.markdown("---")
@@ -2563,13 +2601,11 @@ with tab1:
             ["Imperial", "Metric"],
             key="item_unit_system",
             horizontal=True,
+            on_change=_on_item_unit_system_change,
         )
         unit_choices = units_for_system(unit_system)
-        default_unit = "oz" if unit_system == "Imperial" else "g"
-        if default_unit not in unit_choices:
-            default_unit = unit_choices[0]
-        if st.session_state.get("add_item_unit") not in unit_choices:
-            st.session_state.add_item_unit = default_unit
+        unit_key = add_item_unit_key(unit_system)
+        sync_unit_widget(unit_key, unit_system)
         if st.session_state.get("add_item_category") not in PANTRY_CATEGORIES:
             st.session_state.add_item_category = PANTRY_CATEGORIES[0]
 
@@ -2587,7 +2623,7 @@ with tab1:
             with amount_col:
                 amount = st.text_input("Amount:", key="add_item_amount")
             with unit_col:
-                unit = st.selectbox("Unit:", unit_choices, key="add_item_unit")
+                unit = st.selectbox("Unit:", unit_choices, key=unit_key)
             submitted = st.form_submit_button("Add to Pantry")
 
             if submitted and new_item:
@@ -2627,25 +2663,83 @@ with tab1:
                 axis=1,
             )
             display["system"] = display["unit_system"].fillna("").replace("", "Imperial")
-            table = st.dataframe(
-                display[["item", "category", "amount", "unit", "system"]],
-                width="stretch",
-                hide_index=True,
-                on_select="rerun",
-                selection_mode="single-row",
-                key="pantry_table",
-            )
-            st.caption("Click a row to edit that item. The row number is not editable.")
+            visible = display[["item", "category", "amount", "unit"]].copy()
+            filter_cols = st.columns(4)
+            with filter_cols[0]:
+                item_filter = st.text_input(
+                    "Filter item",
+                    key="pantry_filter_item",
+                    placeholder="Name",
+                )
+            with filter_cols[1]:
+                categories = sorted(
+                    {str(value) for value in visible["category"].dropna() if str(value).strip()},
+                    key=str.casefold,
+                )
+                category_filter = st.multiselect(
+                    "Filter category",
+                    categories,
+                    key="pantry_filter_category",
+                )
+            with filter_cols[2]:
+                amount_filter = st.text_input(
+                    "Filter amount",
+                    key="pantry_filter_amount",
+                    placeholder="Amount",
+                )
+            with filter_cols[3]:
+                units = sorted(
+                    {str(value) for value in visible["unit"].dropna() if str(value).strip()},
+                    key=str.casefold,
+                )
+                unit_filter = st.multiselect(
+                    "Filter unit",
+                    units,
+                    key="pantry_filter_unit",
+                )
+            mask = pd.Series(True, index=display.index)
+            if (item_filter or "").strip():
+                mask &= display["item"].astype(str).str.contains(
+                    item_filter.strip(), case=False, na=False, regex=False
+                )
+            if category_filter:
+                mask &= display["category"].isin(category_filter)
+            if (amount_filter or "").strip():
+                mask &= display["amount"].astype(str).str.contains(
+                    amount_filter.strip(), case=False, na=False, regex=False
+                )
+            if unit_filter:
+                mask &= display["unit"].astype(str).isin(unit_filter)
+            shown = display.loc[mask].reset_index(drop=True)
+            if shown.empty:
+                st.info("No items match those filters.")
+                table = None
+            else:
+                table = st.dataframe(
+                    shown[["item", "category", "amount", "unit"]],
+                    width="stretch",
+                    hide_index=True,
+                    on_select="rerun",
+                    selection_mode="single-row",
+                    key="pantry_table",
+                    column_config={
+                        "item": st.column_config.TextColumn("Item", width="medium"),
+                        "category": st.column_config.TextColumn("Category", width="medium"),
+                        "amount": st.column_config.TextColumn("Amount", width=72),
+                        "unit": st.column_config.TextColumn("Unit", width=80),
+                    },
+                )
+            st.caption("Click a row to edit that item. Filters apply to item, category, amount, and unit.")
 
             selected_rows = []
-            selection = getattr(table, "selection", None)
+            selection = getattr(table, "selection", None) if table is not None else None
             if isinstance(selection, dict):
                 selected_rows = list(selection.get("rows") or [])
             elif selection is not None:
                 selected_rows = list(getattr(selection, "rows", []) or [])
 
             if selected_rows:
-                selected_item = display.iloc[int(selected_rows[0])].to_dict()
+                selected_item = shown.iloc[int(selected_rows[0])].to_dict()
                 selection_token = f"{selected_rows[0]}:{selected_item.get('id')}:{selected_item.get('item')}"
                 if st.session_state.get("pantry_selection_token") != selection_token:
                     st.session_state.pantry_selection_token = selection_token
