@@ -14,7 +14,7 @@ from google import genai
 from google.genai import types
 from supabase import create_client, Client
 
-APP_VERSION = "1.7.2"
+APP_VERSION = "2.0.0"
 
 DEFAULT_APPLIANCES = [
     "Air Fryer",
@@ -1479,22 +1479,46 @@ st.set_page_config(
 )
 
 
-@st.cache_resource
-def init_supabase() -> Client:
+def supabase_settings():
     url = st.secrets["SUPABASE_URL"]
-    key = st.secrets["SUPABASE_KEY"]
+    key = st.secrets.get("SUPABASE_ANON_KEY") or st.secrets["SUPABASE_KEY"]
+    return url, key
+
+
+def anon_client() -> Client:
+    url, key = supabase_settings()
     return create_client(url, key)
 
 
+def get_db() -> Client:
+    url, key = supabase_settings()
+    client = create_client(url, key)
+    session = st.session_state.get("sb_session") or {}
+    access = session.get("access_token")
+    refresh = session.get("refresh_token")
+    if access and refresh:
+        client.auth.set_session(access, refresh)
+    return client
+
+
+def current_household_id():
+    return st.session_state.get("household_id")
+
+
+def current_user_email():
+    user = st.session_state.get("sb_user") or {}
+    return user.get("email") or ""
+
+
 try:
-    supabase: Client = init_supabase()
+    supabase_settings()
 except Exception:
-    st.error("Add SUPABASE_URL and SUPABASE_KEY to `.streamlit/secrets.toml`, then rerun.")
+    st.error("Add SUPABASE_URL and SUPABASE_KEY (anon/public key) to `.streamlit/secrets.toml`, then rerun.")
     st.stop()
 
 
 def load_tag_options(kind, defaults):
-    response = supabase.table("custom_tags").select("name").eq("kind", kind).order("name").execute()
+    response = get_db().table("custom_tags").select("name").eq("kind", kind).order("name").execute()
     extras = [row["name"] for row in (response.data or []) if row.get("name") and row["name"] not in defaults]
     combined = list(defaults) + extras
     return sorted(combined, key=str.casefold)
@@ -1505,25 +1529,25 @@ def add_custom_tag(kind, name, existing):
     if not cleaned:
         return None
     if cleaned not in existing:
-        supabase.table("custom_tags").upsert(
-            {"kind": kind, "name": cleaned},
-            on_conflict="kind,name",
+        get_db().table("custom_tags").upsert(
+            {"household_id": current_household_id(), "kind": kind, "name": cleaned},
+            on_conflict="household_id,kind,name",
         ).execute()
     return cleaned
 
 
 def remove_custom_tag(kind, name):
-    supabase.table("custom_tags").delete().eq("kind", kind).eq("name", name).execute()
+    get_db().table("custom_tags").delete().eq("kind", kind).eq("name", name).execute()
 
 
 def custom_tag_names(kind):
-    response = supabase.table("custom_tags").select("name").eq("kind", kind).order("name").execute()
+    response = get_db().table("custom_tags").select("name").eq("kind", kind).order("name").execute()
     return [row["name"] for row in (response.data or []) if row.get("name")]
 
 
 def fetch_inventory_df():
     response = (
-        supabase.table("pantry_inventory")
+        get_db().table("pantry_inventory")
         .select("*")
         .order("ingredient_name")
         .execute()
@@ -1543,6 +1567,7 @@ def fetch_inventory_df():
 
 def upsert_inventory_item(name, category, amount_value, unit_value, unit_system):
     payload = {
+        "household_id": current_household_id(),
         "ingredient_name": name,
         "category": category,
         "quantity": quantity_value(amount_value),
@@ -1550,20 +1575,20 @@ def upsert_inventory_item(name, category, amount_value, unit_value, unit_system)
         "unit_system": unit_system,
     }
     try:
-        supabase.table("pantry_inventory").upsert(
+        get_db().table("pantry_inventory").upsert(
             payload,
-            on_conflict="ingredient_name",
+            on_conflict="household_id,ingredient_name",
         ).execute()
     except Exception:
         payload.pop("unit_system", None)
-        supabase.table("pantry_inventory").upsert(
+        get_db().table("pantry_inventory").upsert(
             payload,
-            on_conflict="ingredient_name",
+            on_conflict="household_id,ingredient_name",
         ).execute()
 
 
 def delete_inventory_item(name):
-    supabase.table("pantry_inventory").delete().eq("ingredient_name", name).execute()
+    get_db().table("pantry_inventory").delete().eq("ingredient_name", name).execute()
 
 
 def _has_item_id(item_id):
@@ -1587,7 +1612,7 @@ def update_inventory_item(item_id, original_name, name, category, amount_value, 
     }
 
     def _run(data):
-        query = supabase.table("pantry_inventory").update(data)
+        query = get_db().table("pantry_inventory").update(data)
         if _has_item_id(item_id):
             query = query.eq("id", item_id)
         else:
@@ -1602,8 +1627,9 @@ def update_inventory_item(item_id, original_name, name, category, amount_value, 
 
 
 def save_favorite_recipe(title, ingredients, instructions):
-    supabase.table("saved_recipes").insert(
+    get_db().table("saved_recipes").insert(
         {
+            "household_id": current_household_id(),
             "title": title,
             "ingredients": ingredients,
             "instructions": instructions,
@@ -1612,8 +1638,9 @@ def save_favorite_recipe(title, ingredients, instructions):
 
 
 def save_grocery_list(title, items):
-    supabase.table("grocery_lists").insert(
+    get_db().table("grocery_lists").insert(
         {
+            "household_id": current_household_id(),
             "title": title,
             "recipe_title": title,
             "items": items,
@@ -1623,7 +1650,7 @@ def save_grocery_list(title, items):
 
 def fetch_grocery_lists():
     response = (
-        supabase.table("grocery_lists")
+        get_db().table("grocery_lists")
         .select("*")
         .order("created_at", desc=True)
         .limit(20)
@@ -1643,7 +1670,7 @@ def fetch_grocery_lists():
 
 
 def delete_grocery_list(list_id):
-    supabase.table("grocery_lists").delete().eq("id", list_id).execute()
+    get_db().table("grocery_lists").delete().eq("id", list_id).execute()
 
 
 def current_pantry_lookup():
@@ -1718,7 +1745,7 @@ def render_star_rating(rating, size="1.7rem"):
 
 def fetch_saved_recipes_df():
     response = (
-        supabase.table("saved_recipes")
+        get_db().table("saved_recipes")
         .select("*")
         .order("created_at", desc=True)
         .execute()
@@ -1759,19 +1786,19 @@ def sort_saved_recipes(df, sort_by, sort_order="Descending"):
 
 
 def delete_saved_recipe(recipe_id):
-    supabase.table("saved_recipes").delete().eq("id", recipe_id).execute()
+    get_db().table("saved_recipes").delete().eq("id", recipe_id).execute()
 
 
 def update_recipe_rating(recipe_id, rating):
     parsed = _parse_rating(rating)
     if parsed is None:
         raise ValueError("Rating must be between 1 and 5 stars.")
-    supabase.table("saved_recipes").update({"rating": parsed}).eq("id", recipe_id).execute()
+    get_db().table("saved_recipes").update({"rating": parsed}).eq("id", recipe_id).execute()
 
 
 def update_saved_recipe(recipe_id, title, ingredients, instructions):
     cleaned_title = (title or "").strip() or "Generated Recipe"
-    supabase.table("saved_recipes").update(
+    get_db().table("saved_recipes").update(
         {
             "title": cleaned_title,
             "ingredients": (ingredients or "").strip(),
@@ -1782,16 +1809,176 @@ def update_saved_recipe(recipe_id, title, ingredients, instructions):
 
 def update_recipe_comment(recipe_id, comment):
     text = _text_or_empty(comment)
-    supabase.table("saved_recipes").update({"comment": text or None}).eq("id", recipe_id).execute()
+    get_db().table("saved_recipes").update({"comment": text or None}).eq("id", recipe_id).execute()
+
+
+def _store_auth_session(session, user):
+    if not session or not user:
+        return
+    st.session_state.sb_session = {
+        "access_token": session.access_token,
+        "refresh_token": session.refresh_token,
+    }
+    st.session_state.sb_user = {"id": user.id, "email": user.email}
+
+
+def _clear_auth_session():
+    for key in ("sb_session", "sb_user", "household_id", "household_name", "household_invite", "household_role"):
+        st.session_state.pop(key, None)
+
+
+def _rpc_first_row(data):
+    if not data:
+        return {}
+    if isinstance(data, list):
+        return data[0] or {}
+    if isinstance(data, dict):
+        return data
+    return {}
+
+
+def load_household_membership():
+    user = st.session_state.get("sb_user") or {}
+    user_id = user.get("id")
+    if not user_id:
+        return False
+    members = (
+        get_db()
+        .table("household_members")
+        .select("household_id, role")
+        .eq("user_id", user_id)
+        .limit(1)
+        .execute()
+    )
+    rows = members.data or []
+    if not rows:
+        st.session_state.pop("household_id", None)
+        return False
+    household_id = rows[0]["household_id"]
+    household = (
+        get_db()
+        .table("households")
+        .select("id, name, invite_code")
+        .eq("id", household_id)
+        .limit(1)
+        .execute()
+    )
+    info = (household.data or [{}])[0]
+    st.session_state.household_id = household_id
+    st.session_state.household_name = info.get("name") or "Home"
+    st.session_state.household_invite = info.get("invite_code") or ""
+    st.session_state.household_role = rows[0].get("role") or "member"
+    return True
+
+
+def restore_auth_session():
+    if not st.session_state.get("sb_session"):
+        return False
+    try:
+        user = get_db().auth.get_user()
+        if not user or not user.user:
+            _clear_auth_session()
+            return False
+        st.session_state.sb_user = {"id": user.user.id, "email": user.user.email}
+        return True
+    except Exception:
+        _clear_auth_session()
+        return False
+
+
+def require_household_login():
+    restore_auth_session()
+    user = st.session_state.get("sb_user")
+    if not user:
+        st.title("🍳 Pantry Chef")
+        st.caption(f"Household accounts  ·  v{APP_VERSION}")
+        st.info("Sign in so each household keeps its own pantry. People in the same home share one inventory.")
+        mode = st.radio("Account:", ["Sign in", "Create account"], horizontal=True, key="auth_mode")
+        email = st.text_input("Email", key="auth_email")
+        password = st.text_input("Password", type="password", key="auth_password")
+        if mode == "Sign in":
+            if st.button("Sign in", type="primary"):
+                try:
+                    result = anon_client().auth.sign_in_with_password(
+                        {"email": (email or "").strip(), "password": password}
+                    )
+                    _store_auth_session(result.session, result.user)
+                    st.rerun()
+                except Exception as error:
+                    st.error(f"Could not sign in: {error}")
+        else:
+            st.caption("After you create an account, you will start or join a household.")
+            if st.button("Create account", type="primary"):
+                try:
+                    result = anon_client().auth.sign_up(
+                        {"email": (email or "").strip(), "password": password}
+                    )
+                    if result.session and result.user:
+                        _store_auth_session(result.session, result.user)
+                        st.rerun()
+                    else:
+                        st.success("Account created. Confirm the email if Supabase requires it, then sign in.")
+                except Exception as error:
+                    st.error(f"Could not create account: {error}")
+        st.stop()
+
+    if load_household_membership():
+        return
+
+    st.title("🍳 Your household")
+    st.caption(f"Signed in as {current_user_email()}")
+    st.write("Create a household for this home, or join one with the invite code from someone already in it.")
+    create_tab, join_tab = st.tabs(["Create household", "Join with invite code"])
+    with create_tab:
+        name = st.text_input("Household name", value="Home", key="new_household_name")
+        st.caption("The first household created on this database also claims any existing pantry rows that have no household yet.")
+        if st.button("Create household", type="primary"):
+            try:
+                result = get_db().rpc("create_household", {"hname": name}).execute()
+                row = _rpc_first_row(result.data)
+                if row.get("id"):
+                    st.session_state.household_id = row["id"]
+                    st.session_state.household_invite = row.get("invite_code") or ""
+                    st.session_state.household_name = name or "Home"
+                    st.rerun()
+                st.error("Household was not created. Run supabase_household_migration.sql in Supabase, then try again.")
+            except Exception as error:
+                st.error(f"Could not create household: {error}")
+    with join_tab:
+        code = st.text_input("Invite code", key="join_invite_code")
+        if st.button("Join household", type="primary"):
+            try:
+                result = get_db().rpc("join_household", {"code": code}).execute()
+                row = _rpc_first_row(result.data)
+                if row.get("id"):
+                    st.session_state.household_id = row["id"]
+                    st.rerun()
+                st.error("Could not join that household. Check the invite code.")
+            except Exception as error:
+                st.error(f"Could not join household: {error}")
+    if st.button("Sign out", key="auth_signout_no_house"):
+        try:
+            get_db().auth.sign_out()
+        except Exception:
+            pass
+        _clear_auth_session()
+        st.rerun()
+    st.stop()
 
 
 HELP_GUIDE = """
 ### Welcome
-Pantry Chef turns what you already have on hand into meal ideas. Work left to right: set household preferences, stock the pantry, generate recipes, then save the ones you want to cook.
+Pantry Chef turns what you already have on hand into meal ideas. Each **household** has its own pantry. People in the same home share inventory, recipes, and grocery lists. Other households cannot see them.
+
+Work left to right: set household preferences, stock the pantry, generate recipes, then save the ones you want to cook.
+
+### Sign in
+Create an account, then **Create household** or **Join with invite code**. Share the invite code from the sidebar with family only. The first household created on this database claims any leftover pantry rows from before v2.0.
 
 ### Sidebar: AI and household setup
 - **AI engine:** Google Gemini uses the key in Streamlit secrets. Local Ollama talks to a model on port 11434.
 - **Appliances and diets:** Select what matches your kitchen. Open **Add / remove custom options** to type extras (for example a pizza oven or a Jain diet).
+- **Household:** The sidebar shows who is signed in and the invite code. Sign out from there.
 - **Measurement system:** Imperial or Metric is the default for new pantry items. You can still change units on each item.
 
 ### Pantry Inventory
@@ -2344,6 +2531,8 @@ def grocery_list_dialog():
         st.rerun()
 
 
+require_household_login()
+
 title_col, help_col = st.columns([0.9, 0.1], vertical_alignment="center")
 with title_col:
     st.title("🍳 Meal Planner & Pantry Recipe Generator")
@@ -2354,6 +2543,19 @@ with help_col:
 
 # --- SIDEBAR: SETTINGS & LLM CHOICE ---
 st.sidebar.caption("☁️ Connected to Supabase")
+st.sidebar.markdown(f"**{st.session_state.get('household_name') or 'Household'}**")
+st.sidebar.caption(current_user_email())
+invite = st.session_state.get("household_invite") or ""
+if invite:
+    st.sidebar.caption("Invite code (family only)")
+    st.sidebar.code(invite, language=None)
+if st.sidebar.button("Sign out"):
+    try:
+        get_db().auth.sign_out()
+    except Exception:
+        pass
+    _clear_auth_session()
+    st.rerun()
 st.sidebar.header("⚙️ AI & Configuration Settings")
 ai_provider = st.sidebar.radio("Select AI Engine:", ["Google Gemini API", "Local Ollama (CPU)"])
 

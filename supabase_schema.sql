@@ -1,4 +1,5 @@
--- Run this in the Supabase SQL editor if the tables do not already exist.
+-- Fresh install: run this file, then supabase_household_migration.sql (Pantry Chef 2.0 households).
+-- Existing projects already on v1 tables: run only supabase_household_migration.sql.
 
 create table if not exists pantry_inventory (
     id bigint generated always as identity primary key,

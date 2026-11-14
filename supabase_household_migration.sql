@@ -1,0 +1,160 @@
+-- Pantry Chef 2.0: household login. Run this in the EXISTING project SQL editor.
+-- After this, the Streamlit SUPABASE_KEY must be the anon (public) key, not service_role.
+-- In Authentication > Providers > Email, you can turn off "Confirm email" for easier household signup.
+
+create table if not exists households (
+    id uuid primary key default gen_random_uuid(),
+    name text not null,
+    invite_code text not null unique,
+    created_at timestamptz default now()
+);
+
+create table if not exists household_members (
+    household_id uuid not null references households(id) on delete cascade,
+    user_id uuid not null references auth.users(id) on delete cascade,
+    role text not null default 'member',
+    created_at timestamptz default now(),
+    primary key (household_id, user_id),
+    constraint household_members_role_check check (role in ('owner', 'member'))
+);
+
+alter table pantry_inventory add column if not exists household_id uuid references households(id) on delete cascade;
+alter table saved_recipes add column if not exists household_id uuid references households(id) on delete cascade;
+alter table custom_tags add column if not exists household_id uuid references households(id) on delete cascade;
+alter table grocery_lists add column if not exists household_id uuid references households(id) on delete cascade;
+
+alter table pantry_inventory drop constraint if exists pantry_inventory_ingredient_name_key;
+drop index if exists pantry_inventory_ingredient_name_key;
+create unique index if not exists pantry_inventory_household_name
+    on pantry_inventory (household_id, ingredient_name);
+
+alter table custom_tags drop constraint if exists custom_tags_pkey;
+create unique index if not exists custom_tags_household_kind_name
+    on custom_tags (household_id, kind, name);
+
+create or replace function current_household_ids()
+returns setof uuid
+language sql
+stable
+security definer
+set search_path = public
+as $$
+    select household_id
+    from household_members
+    where user_id = auth.uid();
+$$;
+
+create or replace function create_household(hname text)
+returns table(id uuid, invite_code text)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+    hid uuid;
+    code text;
+    cleaned text;
+begin
+    if auth.uid() is null then
+        raise exception 'Not signed in';
+    end if;
+    if exists (select 1 from household_members where user_id = auth.uid()) then
+        raise exception 'You are already in a household';
+    end if;
+    cleaned := nullif(trim(hname), '');
+    if cleaned is null then
+        cleaned := 'Home';
+    end if;
+    loop
+        code := upper(substr(replace(gen_random_uuid()::text, '-', ''), 1, 8));
+        exit when not exists (select 1 from households where invite_code = code);
+    end loop;
+    insert into households (name, invite_code) values (cleaned, code) returning households.id into hid;
+    insert into household_members (household_id, user_id, role) values (hid, auth.uid(), 'owner');
+    update pantry_inventory set household_id = hid where household_id is null;
+    update saved_recipes set household_id = hid where household_id is null;
+    update custom_tags set household_id = hid where household_id is null;
+    update grocery_lists set household_id = hid where household_id is null;
+    return query select hid, code;
+end;
+$$;
+
+create or replace function join_household(code text)
+returns table(id uuid, invite_code text)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+    hid uuid;
+    found_code text;
+    cleaned text;
+begin
+    if auth.uid() is null then
+        raise exception 'Not signed in';
+    end if;
+    if exists (select 1 from household_members where user_id = auth.uid()) then
+        raise exception 'You are already in a household';
+    end if;
+    cleaned := upper(trim(code));
+    select households.id, households.invite_code
+      into hid, found_code
+      from households
+     where households.invite_code = cleaned;
+    if hid is null then
+        raise exception 'Invalid invite code';
+    end if;
+    insert into household_members (household_id, user_id, role)
+    values (hid, auth.uid(), 'member')
+    on conflict do nothing;
+    return query select hid, found_code;
+end;
+$$;
+
+alter table households enable row level security;
+alter table household_members enable row level security;
+alter table pantry_inventory enable row level security;
+alter table saved_recipes enable row level security;
+alter table custom_tags enable row level security;
+alter table grocery_lists enable row level security;
+
+drop policy if exists "pantry_inventory_all" on pantry_inventory;
+drop policy if exists "saved_recipes_all" on saved_recipes;
+drop policy if exists "custom_tags_all" on custom_tags;
+drop policy if exists "grocery_lists_all" on grocery_lists;
+
+drop policy if exists "households_select" on households;
+create policy "households_select" on households
+    for select using (id in (select current_household_ids()));
+
+drop policy if exists "household_members_select" on household_members;
+create policy "household_members_select" on household_members
+    for select using (household_id in (select current_household_ids()) or user_id = auth.uid());
+
+drop policy if exists "pantry_inventory_household" on pantry_inventory;
+create policy "pantry_inventory_household" on pantry_inventory
+    for all using (household_id in (select current_household_ids()))
+    with check (household_id in (select current_household_ids()));
+
+drop policy if exists "saved_recipes_household" on saved_recipes;
+create policy "saved_recipes_household" on saved_recipes
+    for all using (household_id in (select current_household_ids()))
+    with check (household_id in (select current_household_ids()));
+
+drop policy if exists "custom_tags_household" on custom_tags;
+create policy "custom_tags_household" on custom_tags
+    for all using (household_id in (select current_household_ids()))
+    with check (household_id in (select current_household_ids()));
+
+drop policy if exists "grocery_lists_household" on grocery_lists;
+create policy "grocery_lists_household" on grocery_lists
+    for all using (household_id in (select current_household_ids()))
+    with check (household_id in (select current_household_ids()));
+
+grant usage on schema public to authenticated;
+grant select on households to authenticated;
+grant select on household_members to authenticated;
+grant select, insert, update, delete on pantry_inventory, saved_recipes, custom_tags, grocery_lists to authenticated;
+grant execute on function current_household_ids() to authenticated;
+grant execute on function create_household(text) to authenticated;
+grant execute on function join_household(text) to authenticated;
