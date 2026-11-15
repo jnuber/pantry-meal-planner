@@ -1,4 +1,4 @@
--- Pantry Chef 2.1.2: persist household appliances, diets, units, and servings.
+-- Pantry Chef 2.1.3: persist household appliances, diets, units, and servings.
 -- Run in the EXISTING project SQL editor.
 
 alter table households add column if not exists appliances jsonb not null default '["Oven", "Stovetop"]'::jsonb;
@@ -13,11 +13,13 @@ alter table households drop constraint if exists households_servings_check;
 alter table households add constraint households_servings_check
     check (servings >= 1 and servings <= 12);
 
+drop function if exists save_household_prefs(jsonb, jsonb, text, integer);
+
 create or replace function save_household_prefs(
-    appliances jsonb,
-    dietary jsonb,
-    unit_system text,
-    servings integer
+    p_appliances jsonb,
+    p_dietary jsonb,
+    p_unit_system text,
+    p_servings integer
 )
 returns text
 language plpgsql
@@ -40,11 +42,11 @@ begin
     if hid is null then
         raise exception 'You are not in a household';
     end if;
-    units := case when unit_system in ('Imperial', 'Metric') then unit_system else 'Imperial' end;
-    serve := least(12, greatest(1, coalesce(servings, 4)));
+    units := case when p_unit_system in ('Imperial', 'Metric') then p_unit_system else 'Imperial' end;
+    serve := least(12, greatest(1, coalesce(p_servings, 4)));
     update households
-       set appliances = coalesce(appliances, '[]'::jsonb),
-           dietary = coalesce(dietary, '["None"]'::jsonb),
+       set appliances = coalesce(p_appliances, '[]'::jsonb),
+           dietary = coalesce(p_dietary, '["None"]'::jsonb),
            unit_system = units,
            servings = serve
      where id = hid;

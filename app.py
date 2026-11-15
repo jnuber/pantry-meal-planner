@@ -14,7 +14,7 @@ from google import genai
 from google.genai import types
 from supabase import create_client, Client
 
-APP_VERSION = "2.1.2"
+APP_VERSION = "2.1.3"
 APP_RELEASE_DATE = "November 15, 2026"
 APP_AUTHOR = "John Nuber"
 APP_AUTHOR_EMAIL = "jnuber1@gmail.com"
@@ -1992,10 +1992,10 @@ def persist_household_prefs():
         get_db().rpc(
             "save_household_prefs",
             {
-                "appliances": st.session_state.get("appliance_select") or [],
-                "dietary": st.session_state.get("dietary_select") or ["None"],
-                "unit_system": st.session_state.get("pref_unit_system") or "Imperial",
-                "servings": int(st.session_state.get("pref_servings") or 4),
+                "p_appliances": st.session_state.get("appliance_select") or [],
+                "p_dietary": st.session_state.get("dietary_select") or ["None"],
+                "p_unit_system": st.session_state.get("pref_unit_system") or "Imperial",
+                "p_servings": int(st.session_state.get("pref_servings") or 4),
             },
         ).execute()
         st.session_state.pop("prefs_save_error", None)
