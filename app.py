@@ -14,7 +14,7 @@ from google import genai
 from google.genai import types
 from supabase import create_client, Client
 
-APP_VERSION = "2.1.1"
+APP_VERSION = "2.1.2"
 APP_RELEASE_DATE = "November 15, 2026"
 APP_AUTHOR = "John Nuber"
 APP_AUTHOR_EMAIL = "jnuber1@gmail.com"
@@ -176,6 +176,7 @@ def _on_pref_unit_system_change():
     system = st.session_state.get("pref_unit_system") or "Imperial"
     st.session_state.item_unit_system = system
     sync_unit_widget(add_item_unit_key(system), system)
+    persist_household_prefs()
 
 
 def _on_item_unit_system_change():
@@ -1871,12 +1872,35 @@ def _clear_auth_session():
         "household_invite",
         "household_role",
         "password_recovery",
+        "prefs_hydrated_for",
+        "hh_appliances",
+        "hh_dietary",
+        "hh_unit_system",
+        "hh_servings",
+        "appliance_select",
+        "dietary_select",
+        "pref_unit_system",
+        "pref_servings",
     ):
         st.session_state.pop(key, None)
 
 
 def _clear_household_only():
-    for key in ("household_id", "household_name", "household_invite", "household_role"):
+    for key in (
+        "household_id",
+        "household_name",
+        "household_invite",
+        "household_role",
+        "prefs_hydrated_for",
+        "hh_appliances",
+        "hh_dietary",
+        "hh_unit_system",
+        "hh_servings",
+        "appliance_select",
+        "dietary_select",
+        "pref_unit_system",
+        "pref_servings",
+    ):
         st.session_state.pop(key, None)
 
 
@@ -1908,20 +1932,86 @@ def load_household_membership():
         st.session_state.pop("household_id", None)
         return False
     household_id = rows[0]["household_id"]
-    household = (
-        get_db()
-        .table("households")
-        .select("id, name, invite_code")
-        .eq("id", household_id)
-        .limit(1)
-        .execute()
-    )
-    info = (household.data or [{}])[0]
+    info = {}
+    try:
+        household = (
+            get_db()
+            .table("households")
+            .select("id, name, invite_code, appliances, dietary, unit_system, servings")
+            .eq("id", household_id)
+            .limit(1)
+            .execute()
+        )
+        info = (household.data or [{}])[0]
+        st.session_state.hh_appliances = _pref_str_list(info.get("appliances"), ["Oven", "Stovetop"])
+        st.session_state.hh_dietary = _pref_str_list(info.get("dietary"), ["None"])
+        system = info.get("unit_system") or "Imperial"
+        st.session_state.hh_unit_system = system if system in ("Imperial", "Metric") else "Imperial"
+        try:
+            servings = int(info.get("servings") or 4)
+        except (TypeError, ValueError):
+            servings = 4
+        st.session_state.hh_servings = min(12, max(1, servings))
+    except Exception:
+        household = (
+            get_db()
+            .table("households")
+            .select("id, name, invite_code")
+            .eq("id", household_id)
+            .limit(1)
+            .execute()
+        )
+        info = (household.data or [{}])[0]
+        st.session_state.hh_appliances = ["Oven", "Stovetop"]
+        st.session_state.hh_dietary = ["None"]
+        st.session_state.hh_unit_system = "Imperial"
+        st.session_state.hh_servings = 4
     st.session_state.household_id = household_id
     st.session_state.household_name = info.get("name") or "Home"
     st.session_state.household_invite = info.get("invite_code") or ""
     st.session_state.household_role = rows[0].get("role") or "member"
     return True
+
+
+def _pref_str_list(value, fallback):
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except Exception:
+            value = None
+    if not isinstance(value, list) or not value:
+        return list(fallback)
+    cleaned = [str(item) for item in value if str(item).strip()]
+    return cleaned or list(fallback)
+
+
+def persist_household_prefs():
+    if not current_household_id():
+        return
+    try:
+        get_db().rpc(
+            "save_household_prefs",
+            {
+                "appliances": st.session_state.get("appliance_select") or [],
+                "dietary": st.session_state.get("dietary_select") or ["None"],
+                "unit_system": st.session_state.get("pref_unit_system") or "Imperial",
+                "servings": int(st.session_state.get("pref_servings") or 4),
+            },
+        ).execute()
+        st.session_state.pop("prefs_save_error", None)
+    except Exception as error:
+        st.session_state["prefs_save_error"] = str(error)
+
+
+def hydrate_household_prefs():
+    hid = current_household_id()
+    if not hid or st.session_state.get("prefs_hydrated_for") == hid:
+        return
+    st.session_state.appliance_select = list(st.session_state.get("hh_appliances") or ["Oven", "Stovetop"])
+    st.session_state.dietary_select = list(st.session_state.get("hh_dietary") or ["None"])
+    st.session_state.pref_unit_system = st.session_state.get("hh_unit_system") or "Imperial"
+    st.session_state.pref_servings = int(st.session_state.get("hh_servings") or 4)
+    st.session_state.prefs_hydrated_for = hid
 
 
 def restore_auth_session():
@@ -2344,7 +2434,7 @@ Also in the collapsed **Household** sidebar section.
 
 ### Sidebar
 - **Household** (collapsed): invite code, **Invite family**, Leave, Delete (owner), Sign out.
-- **Household Preferences** (always open): appliances, diets, measurement system, servings. Open **Add / remove custom options** for extras (for example a pizza oven or a Jain diet).
+- **Household Preferences** (always open): appliances, diets, measurement system, servings. These save for the whole household, so they come back after you sign out. Open **Add / remove custom options** for extras (for example a pizza oven or a Jain diet).
 - Recipes use Google Gemini. The key is not shown in the sidebar when secrets are set.
 
 ### Admin: Google Gemini API key
@@ -3110,23 +3200,30 @@ except Exception as e:
     dietary_options = sorted(DEFAULT_DIETARY, key=str.casefold)
     st.sidebar.warning(f"Custom preference lists could not be loaded: {e}")
 
+hydrate_household_prefs()
+prefs_save_error = st.session_state.get("prefs_save_error")
+if prefs_save_error:
+    st.sidebar.caption(
+        "Preferences did not save. Run supabase_household_prefs.sql in Supabase, then try again."
+    )
+
 
 def _drop_none_if_other_dietary():
     selected = st.session_state.get("dietary_select", [])
     if "None" in selected and len(selected) > 1:
         st.session_state.dietary_select = [item for item in selected if item != "None"]
+    persist_household_prefs()
 
 
 appliances = st.sidebar.multiselect(
     "Available Appliances:",
     appliance_options,
-    default=["Oven", "Stovetop"],
     key="appliance_select",
+    on_change=persist_household_prefs,
 )
 dietary_restrictions = st.sidebar.multiselect(
     "Dietary Restrictions:",
     dietary_options,
-    default=["None"],
     key="dietary_select",
     on_change=_drop_none_if_other_dietary,
 )
@@ -3141,6 +3238,7 @@ with st.sidebar.expander("Add / remove custom options"):
             if added not in current:
                 current.append(added)
             st.session_state.appliance_select = current
+            persist_household_prefs()
             st.rerun()
         else:
             st.warning("Enter an appliance name first.")
@@ -3153,6 +3251,7 @@ with st.sidebar.expander("Add / remove custom options"):
             if added not in current:
                 current.append(added)
             st.session_state.dietary_select = current
+            persist_household_prefs()
             st.rerun()
         else:
             st.warning("Enter a dietary restriction first.")
@@ -3176,6 +3275,7 @@ with st.sidebar.expander("Add / remove custom options"):
                     for item in st.session_state.get("appliance_select", [])
                     if item != to_remove
                 ]
+            persist_household_prefs()
             st.rerun()
 
 preferred_system = st.sidebar.radio(
@@ -3186,7 +3286,13 @@ preferred_system = st.sidebar.radio(
     help="Sets the unit list for new pantry items. Metric shows ml, L, g, kg.",
     on_change=_on_pref_unit_system_change,
 )
-servings = st.sidebar.number_input("Number of Servings:", min_value=1, max_value=12, value=4)
+servings = st.sidebar.number_input(
+    "Number of Servings:",
+    min_value=1,
+    max_value=12,
+    key="pref_servings",
+    on_change=persist_household_prefs,
+)
 if not gemini_key:
     gemini_key = st.sidebar.text_input("Gemini API Key:", type="password")
 st.sidebar.caption(f"Pantry Chef  ·  v{APP_VERSION}")

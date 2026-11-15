@@ -9,6 +9,11 @@ create table if not exists households (
     created_at timestamptz default now()
 );
 
+alter table households add column if not exists appliances jsonb not null default '["Oven", "Stovetop"]'::jsonb;
+alter table households add column if not exists dietary jsonb not null default '["None"]'::jsonb;
+alter table households add column if not exists unit_system text not null default 'Imperial';
+alter table households add column if not exists servings integer not null default 4;
+
 create table if not exists household_members (
     household_id uuid not null references households(id) on delete cascade,
     user_id uuid not null references auth.users(id) on delete cascade,
@@ -198,6 +203,45 @@ begin
 end;
 $$;
 
+create or replace function save_household_prefs(
+    appliances jsonb,
+    dietary jsonb,
+    unit_system text,
+    servings integer
+)
+returns text
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+    hid uuid;
+    units text;
+    serve integer;
+begin
+    if auth.uid() is null then
+        raise exception 'Not signed in';
+    end if;
+    select hm.household_id
+      into hid
+      from household_members hm
+     where hm.user_id = auth.uid()
+     limit 1;
+    if hid is null then
+        raise exception 'You are not in a household';
+    end if;
+    units := case when unit_system in ('Imperial', 'Metric') then unit_system else 'Imperial' end;
+    serve := least(12, greatest(1, coalesce(servings, 4)));
+    update households
+       set appliances = coalesce(appliances, '[]'::jsonb),
+           dietary = coalesce(dietary, '["None"]'::jsonb),
+           unit_system = units,
+           servings = serve
+     where id = hid;
+    return 'ok';
+end;
+$$;
+
 alter table households enable row level security;
 alter table household_members enable row level security;
 alter table pantry_inventory enable row level security;
@@ -247,3 +291,4 @@ grant execute on function create_household(text) to authenticated;
 grant execute on function join_household(text) to authenticated;
 grant execute on function leave_household() to authenticated;
 grant execute on function delete_household() to authenticated;
+grant execute on function save_household_prefs(jsonb, jsonb, text, integer) to authenticated;
