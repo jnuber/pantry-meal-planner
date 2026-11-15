@@ -14,7 +14,7 @@ from google import genai
 from google.genai import types
 from supabase import create_client, Client
 
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.1.1"
 APP_RELEASE_DATE = "November 15, 2026"
 APP_AUTHOR = "John Nuber"
 APP_AUTHOR_EMAIL = "jnuber1@gmail.com"
@@ -1968,6 +1968,27 @@ def _join_after_auth():
         st.session_state["pending_invite"] = code
 
 
+def _sign_in_or_sign_up(email, password):
+    cleaned = (email or "").strip()
+    try:
+        return anon_client().auth.sign_in_with_password(
+            {"email": cleaned, "password": password}
+        )
+    except Exception:
+        try:
+            return anon_client().auth.sign_up(
+                {"email": cleaned, "password": password}
+            )
+        except Exception as sign_up_error:
+            text = str(sign_up_error).lower()
+            if "already" in text or "registered" in text:
+                raise RuntimeError(
+                    "That email already has an account. Check the password, "
+                    "or choose Sign in and paste the invite code."
+                ) from sign_up_error
+            raise sign_up_error
+
+
 def public_app_url():
     try:
         url = getattr(st.context, "url", None) or ""
@@ -2211,23 +2232,28 @@ def require_household_login():
                     st.error(f"Could not create account: {error}")
         else:
             st.text_input("Invite code", key="auth_invite")
-            st.caption("This creates your account and adds you to that household. Already have an account? Use Sign in and paste the same code.")
+            st.caption(
+                "New here? This creates your account and joins that household. "
+                "Already have an account (even if you left)? Same button signs you in and joins."
+            )
             if st.button("Join household", type="primary"):
                 if not (st.session_state.get("auth_invite") or "").strip():
                     st.error("Paste the invite code from someone already in the household.")
                 else:
                     try:
-                        result = anon_client().auth.sign_up(
-                            {"email": (email or "").strip(), "password": password}
-                        )
-                        if result.session and result.user:
-                            _store_auth_session(result.session, result.user)
+                        result = _sign_in_or_sign_up(email, password)
+                        if result.session and (result.user or result.session.user):
+                            user = result.user or result.session.user
+                            _store_auth_session(result.session, user)
                             _join_after_auth()
                             st.rerun()
                         else:
-                            st.success("Account created. Confirm the email if Supabase requires it, then use Sign in and paste the invite code.")
+                            st.success(
+                                "Account created. Confirm the email if Supabase requires it, "
+                                "then use Sign in and paste the invite code."
+                            )
                     except Exception as error:
-                        st.error(f"Could not create account: {error}")
+                        st.error(f"Could not join: {error}")
         render_forgot_password()
         st.stop()
 
@@ -2302,7 +2328,7 @@ Treat the code like a password. Anyone with it can join and see the pantry, reci
 
 **For the person you invited**
 1. Open the app URL from the email (Cloud is `https://pantry-meal-planner.streamlit.app`).
-2. Choose **Join with invite**, enter their own email and password, paste the code, tap **Join household**.
+2. Choose **Join with invite**, enter their email and password, paste the code, tap **Join household**. That works for a new account or for someone who already registered and later left.
 3. They can instead use **Create account** or **Sign in** and paste the code there. They should not tap **Create household** if they meant to share yours.
 4. If it worked, they see the same pantry. The invite code is in **Household** on the sidebar.
 
