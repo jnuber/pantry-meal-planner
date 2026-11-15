@@ -44,21 +44,24 @@ as $$
     where user_id = auth.uid();
 $$;
 
+drop function if exists create_household(text);
+drop function if exists join_household(text);
+
 create or replace function create_household(hname text)
-returns table(id uuid, invite_code text)
+returns table(household_id uuid, household_invite text)
 language plpgsql
 security definer
 set search_path = public
 as $$
 declare
     hid uuid;
-    code text;
+    new_code text;
     cleaned text;
 begin
     if auth.uid() is null then
         raise exception 'Not signed in';
     end if;
-    if exists (select 1 from household_members where user_id = auth.uid()) then
+    if exists (select 1 from household_members hm where hm.user_id = auth.uid()) then
         raise exception 'You are already in a household';
     end if;
     cleaned := nullif(trim(hname), '');
@@ -66,21 +69,28 @@ begin
         cleaned := 'Home';
     end if;
     loop
-        code := upper(substr(replace(gen_random_uuid()::text, '-', ''), 1, 8));
-        exit when not exists (select 1 from households where invite_code = code);
+        new_code := upper(substr(replace(gen_random_uuid()::text, '-', ''), 1, 8));
+        exit when not exists (
+            select 1 from households h where h.invite_code = new_code
+        );
     end loop;
-    insert into households (name, invite_code) values (cleaned, code) returning households.id into hid;
-    insert into household_members (household_id, user_id, role) values (hid, auth.uid(), 'owner');
-    update pantry_inventory set household_id = hid where household_id is null;
-    update saved_recipes set household_id = hid where household_id is null;
-    update custom_tags set household_id = hid where household_id is null;
-    update grocery_lists set household_id = hid where household_id is null;
-    return query select hid, code;
+    insert into households as h (name, invite_code)
+    values (cleaned, new_code)
+    returning h.id into hid;
+    insert into household_members (household_id, user_id, role)
+    values (hid, auth.uid(), 'owner');
+    update pantry_inventory set household_id = hid where pantry_inventory.household_id is null;
+    update saved_recipes set household_id = hid where saved_recipes.household_id is null;
+    update custom_tags set household_id = hid where custom_tags.household_id is null;
+    update grocery_lists set household_id = hid where grocery_lists.household_id is null;
+    household_id := hid;
+    household_invite := new_code;
+    return next;
 end;
 $$;
 
-create or replace function join_household(code text)
-returns table(id uuid, invite_code text)
+create or replace function join_household(invite text)
+returns table(household_id uuid, household_invite text)
 language plpgsql
 security definer
 set search_path = public
@@ -93,21 +103,23 @@ begin
     if auth.uid() is null then
         raise exception 'Not signed in';
     end if;
-    if exists (select 1 from household_members where user_id = auth.uid()) then
+    if exists (select 1 from household_members hm where hm.user_id = auth.uid()) then
         raise exception 'You are already in a household';
     end if;
-    cleaned := upper(trim(code));
-    select households.id, households.invite_code
+    cleaned := upper(trim(invite));
+    select h.id, h.invite_code
       into hid, found_code
-      from households
-     where households.invite_code = cleaned;
+      from households h
+     where h.invite_code = cleaned;
     if hid is null then
         raise exception 'Invalid invite code';
     end if;
-    insert into household_members (household_id, user_id, role)
+    insert into household_members as hm (household_id, user_id, role)
     values (hid, auth.uid(), 'member')
     on conflict do nothing;
-    return query select hid, found_code;
+    household_id := hid;
+    household_invite := found_code;
+    return next;
 end;
 $$;
 

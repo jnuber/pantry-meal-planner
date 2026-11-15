@@ -1936,9 +1936,12 @@ def require_household_login():
             try:
                 result = get_db().rpc("create_household", {"hname": name}).execute()
                 row = _rpc_first_row(result.data)
-                if row.get("id"):
-                    st.session_state.household_id = row["id"]
-                    st.session_state.household_invite = row.get("invite_code") or ""
+                hid = row.get("household_id") or row.get("id")
+                if hid:
+                    st.session_state.household_id = hid
+                    st.session_state.household_invite = (
+                        row.get("household_invite") or row.get("invite_code") or ""
+                    )
                     st.session_state.household_name = name or "Home"
                     st.rerun()
                 st.error("Household was not created. Run supabase_household_migration.sql in Supabase, then try again.")
@@ -1948,10 +1951,11 @@ def require_household_login():
         code = st.text_input("Invite code", key="join_invite_code")
         if st.button("Join household", type="primary"):
             try:
-                result = get_db().rpc("join_household", {"code": code}).execute()
+                result = get_db().rpc("join_household", {"invite": code}).execute()
                 row = _rpc_first_row(result.data)
-                if row.get("id"):
-                    st.session_state.household_id = row["id"]
+                hid = row.get("household_id") or row.get("id")
+                if hid:
+                    st.session_state.household_id = hid
                     st.rerun()
                 st.error("Could not join that household. Check the invite code.")
             except Exception as error:
