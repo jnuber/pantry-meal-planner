@@ -4,7 +4,7 @@ import json
 import re
 import time
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlparse
 
 import streamlit as st
 import pandas as pd
@@ -14,7 +14,7 @@ from google import genai
 from google.genai import types
 from supabase import create_client, Client
 
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.0.7"
 
 DEFAULT_APPLIANCES = [
     "Air Fryer",
@@ -1510,6 +1510,43 @@ def current_user_email():
     return user.get("email") or ""
 
 
+def user_is_household_member():
+    user_id = (st.session_state.get("sb_user") or {}).get("id")
+    if not user_id:
+        return False
+    try:
+        members = (
+            get_db()
+            .table("household_members")
+            .select("household_id")
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+        )
+        return bool(members.data)
+    except Exception:
+        return True
+
+
+def household_member_count():
+    hid = current_household_id()
+    if not hid:
+        return 0
+    try:
+        response = (
+            get_db()
+            .table("household_members")
+            .select("user_id", count="exact")
+            .eq("household_id", hid)
+            .execute()
+        )
+        if response.count is not None:
+            return int(response.count)
+        return len(response.data or [])
+    except Exception:
+        return 1
+
+
 try:
     supabase_settings()
 except Exception:
@@ -1823,7 +1860,20 @@ def _store_auth_session(session, user):
 
 
 def _clear_auth_session():
-    for key in ("sb_session", "sb_user", "household_id", "household_name", "household_invite", "household_role"):
+    for key in (
+        "sb_session",
+        "sb_user",
+        "household_id",
+        "household_name",
+        "household_invite",
+        "household_role",
+        "password_recovery",
+    ):
+        st.session_state.pop(key, None)
+
+
+def _clear_household_only():
+    for key in ("household_id", "household_name", "household_invite", "household_role"):
         st.session_state.pop(key, None)
 
 
@@ -1886,28 +1936,263 @@ def restore_auth_session():
         return False
 
 
+def try_join_household(code):
+    cleaned = (code or "").strip()
+    if not cleaned:
+        return False, "Enter the invite code from someone already in the household."
+    try:
+        result = get_db().rpc("join_household", {"invite": cleaned}).execute()
+        row = _rpc_first_row(result.data)
+        hid = row.get("household_id") or row.get("id")
+        if hid:
+            st.session_state.household_id = hid
+            st.session_state.household_invite = (
+                row.get("household_invite") or row.get("invite_code") or cleaned
+            )
+            return True, ""
+        return False, "Could not join that household. Check the invite code."
+    except Exception as error:
+        return False, f"Could not join household: {error}"
+
+
+def _join_after_auth():
+    code = (st.session_state.get("auth_invite") or "").strip()
+    if not code:
+        return
+    ok, msg = try_join_household(code)
+    if not ok:
+        st.session_state["auth_join_error"] = msg
+        st.session_state["pending_invite"] = code
+
+
+def public_app_url():
+    try:
+        url = getattr(st.context, "url", None) or ""
+        if str(url).startswith("http"):
+            return str(url).split("?")[0].split("#")[0].rstrip("/")
+    except Exception:
+        pass
+    return "https://pantry-meal-planner.streamlit.app"
+
+
+def invite_family_mailto():
+    house = st.session_state.get("household_name") or "our household"
+    code = st.session_state.get("household_invite") or ""
+    url = public_app_url()
+    subject = f"Join our {house} pantry in Pantry Chef"
+    body = (
+        f"You're invited to share the {house} pantry in Pantry Chef.\n\n"
+        f"1. Open: {url}\n"
+        "2. Choose Join with invite\n"
+        "3. Create your account (or sign in if you already have one)\n"
+        f"4. Enter this invite code: {code}\n\n"
+        "Treat this code like a password. Only share it with people in this home.\n"
+    )
+    return f"mailto:?subject={quote(subject)}&body={quote(body)}"
+
+
+def _param_value(params, *names):
+    for name in names:
+        value = params.get(name)
+        if isinstance(value, list):
+            value = value[0] if value else None
+        if value:
+            return str(value)
+    return None
+
+
+def params_from_reset_url(text):
+    text = (text or "").strip()
+    if not text:
+        return {}
+    parsed = urlparse(text)
+    merged = {}
+    for part in (parsed.query, parsed.fragment):
+        for key, values in parse_qs(part).items():
+            if values and values[0]:
+                merged[key] = values[0]
+    if "access_token=" in text and "access_token" not in merged:
+        for key, values in parse_qs(text.split("#")[-1]).items():
+            if values and values[0]:
+                merged[key] = values[0]
+    return merged
+
+
+def apply_recovery_params(params):
+    token_hash = _param_value(params, "token_hash")
+    access = _param_value(params, "recovery_access", "access_token")
+    refresh = _param_value(params, "recovery_refresh", "refresh_token")
+    typ = (_param_value(params, "type") or "").lower()
+    if not access and not token_hash:
+        return False
+    try:
+        client = anon_client()
+        result = None
+        if access and refresh:
+            result = client.auth.set_session(access, refresh)
+        elif token_hash:
+            result = client.auth.verify_otp({"token_hash": token_hash, "type": "recovery"})
+        session = result.session if result else None
+        user = (result.user if result else None) or (session.user if session else None)
+        if session and user:
+            _store_auth_session(session, user)
+            st.session_state.password_recovery = typ in ("", "recovery")
+            try:
+                st.query_params.clear()
+            except Exception:
+                pass
+            return True
+        return False
+    except Exception as error:
+        st.session_state["auth_recovery_error"] = str(error)
+        return False
+
+
+def _capture_recovery_hash():
+    st.components.v1.html(
+        """
+        <script>
+        (function () {
+          function hashFrom(win) {
+            try { return win.location.hash || ""; } catch (err) { return ""; }
+          }
+          const hash = hashFrom(window) || hashFrom(window.parent) || hashFrom(window.top);
+          if (!hash || hash.indexOf("access_token=") === -1) return;
+          const params = new URLSearchParams(hash.replace(/^#/, ""));
+          const access = params.get("access_token");
+          const refresh = params.get("refresh_token");
+          const type = params.get("type") || "recovery";
+          if (!access || !refresh) return;
+          const next = new URL(window.top.location.href);
+          next.hash = "";
+          next.searchParams.set("type", type);
+          next.searchParams.set("recovery_access", access);
+          next.searchParams.set("recovery_refresh", refresh);
+          window.top.location.replace(next.toString());
+        })();
+        </script>
+        """,
+        height=1,
+    )
+
+
+def consume_recovery_link():
+    try:
+        params = dict(st.query_params)
+    except Exception:
+        return
+    if apply_recovery_params(params):
+        st.rerun()
+
+
+def render_new_password_form():
+    st.title("Set a new password")
+    st.caption(current_user_email() or "Password recovery")
+    new_pw = st.text_input("New password", type="password", key="recovery_new_password")
+    confirm = st.text_input("Confirm password", type="password", key="recovery_new_password2")
+    if st.button("Save password", type="primary"):
+        if len(new_pw or "") < 6:
+            st.error("Use at least 6 characters.")
+        elif new_pw != confirm:
+            st.error("Passwords do not match.")
+        else:
+            try:
+                get_db().auth.update_user({"password": new_pw})
+                st.session_state.password_recovery = False
+                st.success("Password updated.")
+                st.rerun()
+            except Exception as error:
+                st.error(f"Could not update password: {error}")
+    if st.button("Cancel"):
+        st.session_state.password_recovery = False
+        try:
+            get_db().auth.sign_out()
+        except Exception:
+            pass
+        _clear_auth_session()
+        st.rerun()
+
+
+def render_forgot_password():
+    recovery_error = st.session_state.pop("auth_recovery_error", None)
+    if recovery_error:
+        st.error(f"Could not open the reset link: {recovery_error}")
+    with st.expander("Forgot password?"):
+        st.markdown(
+            "The email has a **Reset password** link, not a code. Click it. "
+            "If you land back on this sign-in page, copy the **full address** from the browser bar "
+            "(it is long and includes `access_token`) and paste it below."
+        )
+        reset_email = st.text_input("Account email", key="reset_email")
+        if st.button("Send reset email"):
+            cleaned = (reset_email or "").strip()
+            if not cleaned:
+                st.error("Enter the email for that account.")
+            else:
+                try:
+                    anon_client().auth.reset_password_for_email(
+                        cleaned,
+                        {"redirect_to": public_app_url()},
+                    )
+                    st.success("If that account exists, check email and open **Reset password**.")
+                except Exception as error:
+                    st.error(f"Could not send reset email: {error}")
+        pasted = st.text_input("Paste the reset link from the address bar", key="reset_link_paste")
+        if st.button("Continue with pasted link"):
+            parsed = params_from_reset_url(pasted)
+            if apply_recovery_params(parsed):
+                st.rerun()
+            else:
+                st.error(
+                    "That did not look like a reset link. After you click **Reset password**, "
+                    "copy the whole URL from the address bar and paste it here."
+                )
+
+
 def require_household_login():
+    _capture_recovery_hash()
+    consume_recovery_link()
     restore_auth_session()
+    if st.session_state.get("password_recovery") and st.session_state.get("sb_user"):
+        render_new_password_form()
+        st.stop()
     user = st.session_state.get("sb_user")
     if not user:
         st.title("🍳 Pantry Chef")
         st.caption(f"Household accounts  ·  v{APP_VERSION}")
         st.info("Sign in so each household keeps its own pantry. People in the same home share one inventory.")
-        mode = st.radio("Account:", ["Sign in", "Create account"], horizontal=True, key="auth_mode")
+        mode = st.radio(
+            "Account:",
+            ["Sign in", "Create account", "Join with invite"],
+            horizontal=True,
+            key="auth_mode",
+        )
         email = st.text_input("Email", key="auth_email")
         password = st.text_input("Password", type="password", key="auth_password")
         if mode == "Sign in":
+            st.text_input(
+                "Invite code (optional)",
+                key="auth_invite",
+                help="Paste this if you were invited and have not joined a household yet.",
+            )
+            st.caption("Already in the household? Leave the invite blank.")
             if st.button("Sign in", type="primary"):
                 try:
                     result = anon_client().auth.sign_in_with_password(
                         {"email": (email or "").strip(), "password": password}
                     )
                     _store_auth_session(result.session, result.user)
+                    _join_after_auth()
                     st.rerun()
                 except Exception as error:
                     st.error(f"Could not sign in: {error}")
-        else:
-            st.caption("After you create an account, you will start or join a household.")
+        elif mode == "Create account":
+            st.text_input(
+                "Invite code (optional)",
+                key="auth_invite",
+                help="Paste a family invite to join their pantry in this same step.",
+            )
+            st.caption("Leave the invite blank if you are starting the household for this home.")
             if st.button("Create account", type="primary"):
                 try:
                     result = anon_client().auth.sign_up(
@@ -1915,11 +2200,32 @@ def require_household_login():
                     )
                     if result.session and result.user:
                         _store_auth_session(result.session, result.user)
+                        _join_after_auth()
                         st.rerun()
                     else:
-                        st.success("Account created. Confirm the email if Supabase requires it, then sign in.")
+                        st.success("Account created. Confirm the email if Supabase requires it, then sign in. You can paste the invite code on Sign in.")
                 except Exception as error:
                     st.error(f"Could not create account: {error}")
+        else:
+            st.text_input("Invite code", key="auth_invite")
+            st.caption("This creates your account and adds you to that household. Already have an account? Use Sign in and paste the same code.")
+            if st.button("Join household", type="primary"):
+                if not (st.session_state.get("auth_invite") or "").strip():
+                    st.error("Paste the invite code from someone already in the household.")
+                else:
+                    try:
+                        result = anon_client().auth.sign_up(
+                            {"email": (email or "").strip(), "password": password}
+                        )
+                        if result.session and result.user:
+                            _store_auth_session(result.session, result.user)
+                            _join_after_auth()
+                            st.rerun()
+                        else:
+                            st.success("Account created. Confirm the email if Supabase requires it, then use Sign in and paste the invite code.")
+                    except Exception as error:
+                        st.error(f"Could not create account: {error}")
+        render_forgot_password()
         st.stop()
 
     if load_household_membership():
@@ -1927,6 +2233,9 @@ def require_household_login():
 
     st.title("🍳 Your household")
     st.caption(f"Signed in as {current_user_email()}")
+    join_error = st.session_state.pop("auth_join_error", None)
+    if join_error:
+        st.error(join_error)
     st.write("Create a household for this home, or join one with the invite code from someone already in it.")
     create_tab, join_tab = st.tabs(["Create household", "Join with invite code"])
     with create_tab:
@@ -1948,18 +2257,14 @@ def require_household_login():
             except Exception as error:
                 st.error(f"Could not create household: {error}")
     with join_tab:
+        if "join_invite_code" not in st.session_state and st.session_state.get("pending_invite"):
+            st.session_state.join_invite_code = st.session_state.pop("pending_invite")
         code = st.text_input("Invite code", key="join_invite_code")
         if st.button("Join household", type="primary"):
-            try:
-                result = get_db().rpc("join_household", {"invite": code}).execute()
-                row = _rpc_first_row(result.data)
-                hid = row.get("household_id") or row.get("id")
-                if hid:
-                    st.session_state.household_id = hid
-                    st.rerun()
-                st.error("Could not join that household. Check the invite code.")
-            except Exception as error:
-                st.error(f"Could not join household: {error}")
+            ok, msg = try_join_household(code)
+            if ok:
+                st.rerun()
+            st.error(msg)
     if st.button("Sign out", key="auth_signout_no_house"):
         try:
             get_db().auth.sign_out()
@@ -1977,23 +2282,33 @@ Pantry Chef turns what you already have on hand into meal ideas. Each **househol
 Work left to right: set household preferences, stock the pantry, generate recipes, then save the ones you want to cook.
 
 ### Sign in
-Open the app URL (Cloud is `https://pantry-meal-planner.streamlit.app`). Create an account with email and password, then either **Create household** (first person in the home) or **Join with invite code** (everyone else). Do not create a second household if you meant to share the pantry. The first household created on this database claims any leftover pantry rows from before v2.0.
+Open the app URL (Cloud is `https://pantry-meal-planner.streamlit.app`). The first screen has **Sign in**, **Create account**, and **Join with invite**. The first person in the home creates an account (invite blank) and then **Create household**. Everyone else should paste the invite on that first screen so they never start a second household. The first household created on this database claims any leftover pantry rows from before v2.0.
+
+### Forgot password
+On the sign-in screen, open **Forgot password?** Enter the account email and **Send reset email**. The default email has a **Reset password** link, not a code. Click that link. If you land on sign-in instead of a new-password form, copy the full URL from the address bar and paste it into **Paste the reset link**. The account stays in the same household.
+
+In the Supabase project: **Authentication → URL Configuration**. Set **Site URL** to `https://pantry-meal-planner.streamlit.app`. Under **Redirect URLs** add that Cloud URL and `http://localhost:8501`. Optional: **Email Templates → Reset password** can also include a 6-digit code with `{{ .Token }}` and a Streamlit-friendly link `{{ .SiteURL }}?type=recovery&token_hash={{ .TokenHash }}`. You can also set a password under **Authentication → Users** for a test account.
 
 ### Invite family
 There is no in-app email. You send the code yourself.
 
-1. Sign in as someone already in the household. The sidebar shows the household name, your email, and **Invite code (family only)**.
-2. Copy that code. Text or email it only to people in this home. Treat it like a password: anyone with the code can join and see the pantry, recipes, and grocery lists.
-3. They open the same app URL, choose **Create account**, pick their own email and password, then **Create account**.
-4. After they are signed in they see **Your household**. They open **Join with invite code**, paste the code, and tap **Join household**. They should not tap **Create household**.
+1. Sign in as someone already in the household. Open **Household** in the sidebar for the invite code, or tap **Invite family** to open a ready-to-send email with the app URL and code.
+2. Send that email (or copy the code) only to people in this home. Treat the code like a password: anyone with it can join and see the pantry, recipes, and grocery lists.
+3. They open the same app URL. Best path: choose **Join with invite**, enter their email, password, and the code, then **Join household**. That creates their account and adds them in one step.
+4. They can also use **Create account** or **Sign in** and paste the invite there. They should not tap **Create household** if they meant to share yours.
 5. If it worked, they see the same pantry and the same invite code in the sidebar.
 
-If join fails, they typed the code wrong, or they created a new household instead of joining. Sign them out and try Join again with the code from your sidebar.
+If join fails, they typed the code wrong, or they created a new household instead of joining. Use **Leave household** in the sidebar, then **Join with invite** with the code from your sidebar.
+
+### Leave or delete a household
+- **Leave household** (sidebar): you lose access. Other members keep the pantry, and if you were owner someone else becomes owner. If you are the **last person** (typical for a solo test household), leaving deletes that pantry, recipes, tags, grocery lists, and invite. That case asks you twice: a warning, then type the household name and check that you understand.
+- **Delete household** (owner only): type the household name to confirm. That wipes pantry, recipes, tags, grocery lists, and the invite code for everyone, even if others are still members. Use this for a leftover test household, not for the real family pantry.
 
 ### Sidebar: AI and household setup
 - **AI engine:** Google Gemini uses the key in Streamlit secrets. Local Ollama talks to a model on port 11434.
 - **Appliances and diets:** Select what matches your kitchen. Open **Add / remove custom options** to type extras (for example a pizza oven or a Jain diet).
-- **Household:** The sidebar shows who is signed in and the invite code to send family. Sign out from there.
+- **Household:** The household name, invite, **Invite family**, Leave, and Sign out live in a collapsed **Household** section at the top of the sidebar.
+- **AI:** Gemini vs Ollama is in a collapsed **AI & Configuration** section so appliances and diets stay on screen.
 - **Measurement system:** Imperial or Metric is the default for new pantry items. You can still change units on each item.
 
 ### Pantry Inventory
@@ -2546,6 +2861,104 @@ def grocery_list_dialog():
         st.rerun()
 
 
+def _close_leave_household_dialog():
+    st.session_state.show_leave_household_dialog = False
+
+
+def _close_delete_household_dialog():
+    st.session_state.show_delete_household_dialog = False
+
+
+@st.dialog("Leave this household?", width="small", on_dismiss=_close_leave_household_dialog)
+def confirm_leave_household_dialog():
+    name = st.session_state.get("household_name") or "this household"
+    role = st.session_state.get("household_role") or "member"
+    members = household_member_count()
+    last_member = members <= 1
+    st.write(f"Leave **{name}**?")
+    if last_member:
+        st.error("You are the last person in this household.")
+        st.warning(
+            "Leaving will permanently delete this pantry, recipes, tags, grocery lists, "
+            "and the invite code. This cannot be undone."
+        )
+        typed = st.text_input("Type the household name to confirm", key="leave_household_confirm_name")
+        understood = st.checkbox(
+            "I understand this pantry will be deleted",
+            key="leave_household_understand",
+        )
+    elif role == "owner":
+        st.caption(
+            "Others are still in this household. The pantry stays. Someone else becomes owner. "
+            "You lose access until you join again with the invite code."
+        )
+        typed = ""
+        understood = True
+    else:
+        st.caption(
+            "You will lose access to this pantry. Others keep it. "
+            "You stay signed in so you can join another household or create a new one."
+        )
+        typed = ""
+        understood = True
+    leave_col, stay_col = st.columns(2)
+    with leave_col:
+        if st.button("Leave household", type="primary", key="confirm_leave_household_btn"):
+            if last_member and (typed or "").strip() != str(name).strip():
+                st.error("Name did not match.")
+            elif last_member and not understood:
+                st.error("Check the box if you want to delete this pantry by leaving.")
+            else:
+                try:
+                    get_db().rpc("leave_household", {}).execute()
+                    _clear_household_only()
+                    st.session_state.show_leave_household_dialog = False
+                    if user_is_household_member():
+                        st.session_state["leave_failed"] = (
+                            "You are still in a household. Run supabase_household_leave.sql in the Supabase SQL editor, then try Leave again."
+                        )
+                    st.rerun()
+                except Exception as error:
+                    st.error(
+                        "Could not leave. Run supabase_household_leave.sql in the Supabase SQL editor, then try again. "
+                        f"({error})"
+                    )
+    with stay_col:
+        if st.button("Stay", key="stay_in_household"):
+            st.session_state.show_leave_household_dialog = False
+            st.rerun()
+
+
+@st.dialog("Delete this household?", width="small", on_dismiss=_close_delete_household_dialog)
+def confirm_delete_household_dialog():
+    name = st.session_state.get("household_name") or "this household"
+    st.write(
+        f"This deletes the pantry, recipes, tags, grocery lists, and invite code for **{name}** "
+        "for everyone. This cannot be undone."
+    )
+    typed = st.text_input("Type the household name to confirm", key="delete_household_confirm_name")
+    delete_col, keep_col = st.columns(2)
+    with delete_col:
+        if st.button("Delete household", type="primary"):
+            if (typed or "").strip() != str(name).strip():
+                st.error("Name did not match.")
+            else:
+                try:
+                    get_db().rpc("delete_household", {}).execute()
+                    _clear_household_only()
+                    st.session_state.show_delete_household_dialog = False
+                    st.rerun()
+                except Exception as error:
+                    st.error(
+                        "Could not delete. Run supabase_household_leave.sql in the Supabase SQL editor, then try again. "
+                        f"({error})"
+                    )
+    with keep_col:
+        if st.button("Keep household", key="keep_household"):
+            st.session_state.show_delete_household_dialog = False
+            st.rerun()
+
+
 require_household_login()
 
 title_col, help_col = st.columns([0.9, 0.1], vertical_alignment="center")
@@ -2555,46 +2968,42 @@ with help_col:
     with st.container(key="chef_help_corner", horizontal_alignment="right"):
         if st.button("Help", key="chef_help_btn", help="Open the kitchen help guide"):
             show_help_dialog()
+leave_failed = st.session_state.pop("leave_failed", None)
+if leave_failed:
+    st.error(leave_failed)
 
-# --- SIDEBAR: SETTINGS & LLM CHOICE ---
-st.sidebar.caption("☁️ Connected to Supabase")
-st.sidebar.markdown(f"**{st.session_state.get('household_name') or 'Household'}**")
-st.sidebar.caption(current_user_email())
+house_name = st.session_state.get("household_name") or "Household"
 invite = st.session_state.get("household_invite") or ""
-if invite:
-    st.sidebar.caption("Invite code (family only)")
-    st.sidebar.code(invite, language=None)
-if st.sidebar.button("Sign out"):
-    try:
-        get_db().auth.sign_out()
-    except Exception:
-        pass
-    _clear_auth_session()
-    st.rerun()
-st.sidebar.header("⚙️ AI & Configuration Settings")
-ai_provider = st.sidebar.radio("Select AI Engine:", ["Google Gemini API", "Local Ollama (CPU)"])
-
 gemini_key = ""
 ollama_model = "llama3.2"
+ai_provider = "Google Gemini API"
 
-if ai_provider == "Google Gemini API":
-    # Try to load from Streamlit secrets automatically first
-    try:
-        gemini_key = st.secrets.get("GEMINI_API_KEY", "")
-    except Exception:
-        gemini_key = ""
-    
-    # If no secret is found, show the text box so you can still type or override it
-    if not gemini_key:
-        gemini_key = st.sidebar.text_input("Gemini API Key:", type="password")
-    else:
-        st.sidebar.success("🔑 Gemini API Key loaded securely from secrets!")
-else:
-    ollama_model = st.sidebar.text_input("Ollama Model Name:", value="llama3.2")
-    st.sidebar.caption("Ensure Ollama is running (`ollama run llama3.2`) on port 11434.")
+with st.sidebar.expander(f"🏠 {house_name}", expanded=False):
+    st.caption("☁️ Connected to Supabase")
+    st.caption(current_user_email())
+    if invite:
+        st.caption("Invite code (family only)")
+        st.code(invite, language=None)
+        st.link_button("Invite family", invite_family_mailto(), use_container_width=True)
+    if st.button("Leave household", key="sidebar_leave_household", use_container_width=True):
+        st.session_state.show_leave_household_dialog = True
+    if (st.session_state.get("household_role") or "") == "owner":
+        if st.button("Delete household", key="sidebar_delete_household", use_container_width=True):
+            st.session_state.show_delete_household_dialog = True
+    if st.button("Sign out", key="sidebar_sign_out", use_container_width=True):
+        try:
+            get_db().auth.sign_out()
+        except Exception:
+            pass
+        _clear_auth_session()
+        st.rerun()
 
-st.sidebar.markdown("---")
-st.sidebar.subheader("🍽️ Household Preferences")
+if st.session_state.get("show_leave_household_dialog"):
+    confirm_leave_household_dialog()
+if st.session_state.get("show_delete_household_dialog"):
+    confirm_delete_household_dialog()
+
+st.sidebar.header("🍽️ Household Preferences")
 
 try:
     appliance_options = load_tag_options("appliance", DEFAULT_APPLIANCES)
@@ -2681,7 +3090,26 @@ preferred_system = st.sidebar.radio(
     on_change=_on_pref_unit_system_change,
 )
 servings = st.sidebar.number_input("Number of Servings:", min_value=1, max_value=12, value=4)
-st.sidebar.markdown("---")
+
+with st.sidebar.expander("⚙️ AI & Configuration", expanded=False):
+    ai_provider = st.radio(
+        "Select AI Engine:",
+        ["Google Gemini API", "Local Ollama (CPU)"],
+        key="sidebar_ai_provider",
+    )
+    if ai_provider == "Google Gemini API":
+        try:
+            gemini_key = st.secrets.get("GEMINI_API_KEY", "")
+        except Exception:
+            gemini_key = ""
+        if not gemini_key:
+            gemini_key = st.text_input("Gemini API Key:", type="password")
+        else:
+            st.success("🔑 Gemini API Key loaded securely from secrets!")
+    else:
+        ollama_model = st.text_input("Ollama Model Name:", value="llama3.2")
+        st.caption("Ensure Ollama is running (`ollama run llama3.2`) on port 11434.")
+
 st.sidebar.caption(f"Pantry Chef  ·  v{APP_VERSION}")
 
 # --- MAIN NAVIGATION TABS ---
