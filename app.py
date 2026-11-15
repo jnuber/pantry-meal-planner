@@ -1977,12 +1977,23 @@ Pantry Chef turns what you already have on hand into meal ideas. Each **househol
 Work left to right: set household preferences, stock the pantry, generate recipes, then save the ones you want to cook.
 
 ### Sign in
-Create an account, then **Create household** or **Join with invite code**. Share the invite code from the sidebar with family only. The first household created on this database claims any leftover pantry rows from before v2.0.
+Open the app URL (Cloud is `https://pantry-meal-planner.streamlit.app`). Create an account with email and password, then either **Create household** (first person in the home) or **Join with invite code** (everyone else). Do not create a second household if you meant to share the pantry. The first household created on this database claims any leftover pantry rows from before v2.0.
+
+### Invite family
+There is no in-app email. You send the code yourself.
+
+1. Sign in as someone already in the household. The sidebar shows the household name, your email, and **Invite code (family only)**.
+2. Copy that code. Text or email it only to people in this home. Treat it like a password: anyone with the code can join and see the pantry, recipes, and grocery lists.
+3. They open the same app URL, choose **Create account**, pick their own email and password, then **Create account**.
+4. After they are signed in they see **Your household**. They open **Join with invite code**, paste the code, and tap **Join household**. They should not tap **Create household**.
+5. If it worked, they see the same pantry and the same invite code in the sidebar.
+
+If join fails, they typed the code wrong, or they created a new household instead of joining. Sign them out and try Join again with the code from your sidebar.
 
 ### Sidebar: AI and household setup
 - **AI engine:** Google Gemini uses the key in Streamlit secrets. Local Ollama talks to a model on port 11434.
 - **Appliances and diets:** Select what matches your kitchen. Open **Add / remove custom options** to type extras (for example a pizza oven or a Jain diet).
-- **Household:** The sidebar shows who is signed in and the invite code. Sign out from there.
+- **Household:** The sidebar shows who is signed in and the invite code to send family. Sign out from there.
 - **Measurement system:** Imperial or Metric is the default for new pantry items. You can still change units on each item.
 
 ### Pantry Inventory
