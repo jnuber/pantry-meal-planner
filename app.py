@@ -14,7 +14,10 @@ from google import genai
 from google.genai import types
 from supabase import create_client, Client
 
-APP_VERSION = "2.0.7"
+APP_VERSION = "2.1.0"
+APP_RELEASE_DATE = "November 15, 2026"
+APP_AUTHOR = "John Nuber"
+APP_AUTHOR_EMAIL = "jnuber1@gmail.com"
 
 DEFAULT_APPLIANCES = [
     "Air Fryer",
@@ -2279,7 +2282,7 @@ HELP_GUIDE = """
 ### Welcome
 Pantry Chef turns what you already have on hand into meal ideas. Each **household** has its own pantry. People in the same home share inventory, recipes, and grocery lists. Other households cannot see them.
 
-Work left to right: set household preferences, stock the pantry, generate recipes, then save the ones you want to cook.
+Work left to right: set household preferences, stock the pantry, generate recipes, then save the ones you want to cook. The **i** button is About (version and who built it). The chef **?** is this Help guide.
 
 ### Sign in
 Open the app URL (Cloud is `https://pantry-meal-planner.streamlit.app`). The first screen has **Sign in**, **Create account**, and **Join with invite**. The first person in the home creates an account (invite blank) and then **Create household**. Everyone else should paste the invite on that first screen so they never start a second household. The first household created on this database claims any leftover pantry rows from before v2.0.
@@ -2290,26 +2293,41 @@ On the sign-in screen, open **Forgot password?** Enter the account email and **S
 In the Supabase project: **Authentication → URL Configuration**. Set **Site URL** to `https://pantry-meal-planner.streamlit.app`. Under **Redirect URLs** add that Cloud URL and `http://localhost:8501`. Optional: **Email Templates → Reset password** can also include a 6-digit code with `{{ .Token }}` and a Streamlit-friendly link `{{ .SiteURL }}?type=recovery&token_hash={{ .TokenHash }}`. You can also set a password under **Authentication → Users** for a test account.
 
 ### Invite family
-There is no in-app email. You send the code yourself.
+Open the collapsed **Household** section at the top of the sidebar (the household name, for example **KC-Nuber**).
 
-1. Sign in as someone already in the household. Open **Household** in the sidebar for the invite code, or tap **Invite family** to open a ready-to-send email with the app URL and code.
-2. Send that email (or copy the code) only to people in this home. Treat the code like a password: anyone with it can join and see the pantry, recipes, and grocery lists.
-3. They open the same app URL. Best path: choose **Join with invite**, enter their email, password, and the code, then **Join household**. That creates their account and adds them in one step.
-4. They can also use **Create account** or **Sign in** and paste the invite there. They should not tap **Create household** if they meant to share yours.
-5. If it worked, they see the same pantry and the same invite code in the sidebar.
+- **Invite family** opens your mail app with a ready message: the app URL, **Join with invite** steps, and the invite code. Send it only to people in this home.
+- You can also copy the **Invite code** from that same section and text it yourself.
 
-If join fails, they typed the code wrong, or they created a new household instead of joining. Use **Leave household** in the sidebar, then **Join with invite** with the code from your sidebar.
+Treat the code like a password. Anyone with it can join and see the pantry, recipes, and grocery lists.
+
+**For the person you invited**
+1. Open the app URL from the email (Cloud is `https://pantry-meal-planner.streamlit.app`).
+2. Choose **Join with invite**, enter their own email and password, paste the code, tap **Join household**.
+3. They can instead use **Create account** or **Sign in** and paste the code there. They should not tap **Create household** if they meant to share yours.
+4. If it worked, they see the same pantry. The invite code is in **Household** on the sidebar.
+
+If join fails, they typed the code wrong, or they created a new household by mistake. They should **Leave household**, then **Join with invite** with your code.
 
 ### Leave or delete a household
-- **Leave household** (sidebar): you lose access. Other members keep the pantry, and if you were owner someone else becomes owner. If you are the **last person** (typical for a solo test household), leaving deletes that pantry, recipes, tags, grocery lists, and invite. That case asks you twice: a warning, then type the household name and check that you understand.
-- **Delete household** (owner only): type the household name to confirm. That wipes pantry, recipes, tags, grocery lists, and the invite code for everyone, even if others are still members. Use this for a leftover test household, not for the real family pantry.
+Also in the collapsed **Household** sidebar section.
 
-### Sidebar: AI and household setup
-- **AI engine:** Google Gemini uses the key in Streamlit secrets. Local Ollama talks to a model on port 11434.
-- **Appliances and diets:** Select what matches your kitchen. Open **Add / remove custom options** to type extras (for example a pizza oven or a Jain diet).
-- **Household:** The household name, invite, **Invite family**, Leave, and Sign out live in a collapsed **Household** section at the top of the sidebar.
-- **AI:** Gemini vs Ollama is in a collapsed **AI & Configuration** section so appliances and diets stay on screen.
-- **Measurement system:** Imperial or Metric is the default for new pantry items. You can still change units on each item.
+- **Leave household:** your email and password stay. You are no longer in that home, so you will not see that pantry. Other members keep everything. If you were owner and others remain, someone else becomes owner. To get back in, sign in with the **same** account and **Join with invite** using a current code.
+- **Last person leaving:** if you are the only member, Leave deletes that household’s pantry, recipes, tags, grocery lists, and invite. The app warns you twice: a red warning, then type the household name and check that you understand.
+- **Delete household** (owner only): type the household name to confirm. That wipes the pantry for **everyone**, even if others are still members. Use this for a leftover test household, not for the real family pantry.
+- **Sign out** only ends this browser session. It does not leave the household.
+
+### Sidebar
+- **Household** (collapsed): invite code, **Invite family**, Leave, Delete (owner), Sign out.
+- **Household Preferences** (always open): appliances, diets, measurement system, servings. Open **Add / remove custom options** for extras (for example a pizza oven or a Jain diet).
+- Recipes use Google Gemini. The key is not shown in the sidebar when secrets are set.
+
+### Admin: Google Gemini API key
+Family members do not need a key. If recipe generation fails or Google gives you a new key, update it in **two** places (they are separate):
+
+- **This computer:** `.streamlit/secrets.toml` in the pantry project folder. Set `GEMINI_API_KEY = "..."`, save, then refresh or rerun `./run.sh`.
+- **Streamlit Cloud:** the app ⋮ menu → **Settings** → **Secrets**. Change `GEMINI_API_KEY`, save, **Reboot**.
+
+The key is not in GitHub. If secrets are missing, a **Gemini API Key** box appears at the bottom of the sidebar as a fallback.
 
 ### Pantry Inventory
 Add an ingredient name, category, amount, and unit. Choosing **Imperial** or **Metric** on the item switches the unit list (`oz` / `lb` / `cup` versus `g` / `kg` / `ml`). Click a row in **Items on Hand** to edit any field except the row number, then save. Filter that table by item, category, amount, or unit. Adding an existing name also updates that item. Use **Delete selected item** to remove something you used up.
@@ -2334,7 +2352,7 @@ Favorites are stored in Supabase, one entry per recipe. Sort the list by **name*
 ### Tips
 - Be specific in the extra prompt (“air fryer, high protein”) so the chef stays inside your appliances and diet.
 - Keep amounts up to date so generated recipes know how much you actually have.
-- If generation fails, confirm the Gemini key or that Ollama is running.
+- If generation fails, see **Admin: Google Gemini API key** above.
 - If a barcode lookup is slow or fails, try Look up again, or type the numbers. Open Food Facts or UPCitemdb may be busy.
 """
 
@@ -2351,29 +2369,49 @@ CHEF_HELP_ICON = (
     "%3C/svg%3E"
 )
 
+ABOUT_ICON = (
+    "data:image/svg+xml,"
+    "%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E"
+    "%3Ccircle cx='32' cy='32' r='22' fill='%23fffaf3' stroke='%233d2b1f' stroke-width='2.2'/%3E"
+    "%3Ccircle cx='32' cy='32' r='16' fill='%23c45c26'/%3E"
+    "%3Ctext x='32' y='39' text-anchor='middle' font-family='Georgia,Times,serif' font-size='24' "
+    "font-weight='700' fill='%23fffaf3'%3Ei%3C/text%3E"
+    "%3C/svg%3E"
+)
+
 st.markdown(
     f"""
     <style>
-      .st-key-chef_help_corner {{
+      .st-key-chef_help_corner,
+      .st-key-chef_about_corner {{
         display: flex;
         justify-content: flex-end;
       }}
-      .st-key-chef_help_corner button {{
+      .st-key-chef_help_corner button,
+      .st-key-chef_about_corner button {{
         width: 56px !important;
         height: 56px !important;
         min-height: 56px !important;
         border-radius: 50% !important;
         padding: 0 !important;
         border: 1px solid rgba(61, 43, 31, 0.18) !important;
-        background: #fffaf3 url("{CHEF_HELP_ICON}") center / 42px 42px no-repeat !important;
         box-shadow: 0 4px 14px rgba(61, 43, 31, 0.12);
       }}
-      .st-key-chef_help_corner button:hover {{
+      .st-key-chef_help_corner button {{
+        background: #fffaf3 url("{CHEF_HELP_ICON}") center / 42px 42px no-repeat !important;
+      }}
+      .st-key-chef_about_corner button {{
+        background: #fffaf3 url("{ABOUT_ICON}") center / 42px 42px no-repeat !important;
+      }}
+      .st-key-chef_help_corner button:hover,
+      .st-key-chef_about_corner button:hover {{
         transform: scale(1.05);
         box-shadow: 0 6px 16px rgba(61, 43, 31, 0.18);
       }}
       .st-key-chef_help_corner button p,
-      .st-key-chef_help_corner button span {{
+      .st-key-chef_help_corner button span,
+      .st-key-chef_about_corner button p,
+      .st-key-chef_about_corner button span {{
         font-size: 0 !important;
         color: transparent !important;
       }}
@@ -2547,6 +2585,32 @@ st.markdown(
 @st.dialog("Kitchen Help", width="large")
 def show_help_dialog():
     st.markdown(HELP_GUIDE)
+
+
+@st.dialog("About Pantry Chef", width="small")
+def show_about_dialog():
+    st.markdown(
+        f"""
+**Pantry Chef & Meal Planner** turns what you have on hand into meal ideas for one household kitchen.
+
+**Release:** v{APP_VERSION}  
+**Date:** {APP_RELEASE_DATE}
+
+**Author:** {APP_AUTHOR}  
+**Contact:** [{APP_AUTHOR_EMAIL}](mailto:{APP_AUTHOR_EMAIL})
+
+### Hosting
+- App UI: [Streamlit Community Cloud](https://streamlit.io)
+- Database and login: [Supabase](https://supabase.com)
+- Recipe ideas: Google Gemini
+
+Your pantry, recipes, and grocery lists stay in this household’s Supabase project. Other households cannot see them. Gemini only sees what you send when you generate a recipe.
+
+Nutrition numbers and diet labels are AI estimates, not medical advice.
+
+This is a family kitchen tool, not a commercial product. Streamlit, Supabase, and Google are independent services used by the app.
+"""
+    )
 
 
 def _close_edit_dialog():
@@ -2961,22 +3025,29 @@ def confirm_delete_household_dialog():
 
 require_household_login()
 
-title_col, help_col = st.columns([0.9, 0.1], vertical_alignment="center")
+title_col, help_col = st.columns([0.82, 0.18], vertical_alignment="center")
 with title_col:
     st.title("🍳 Meal Planner & Pantry Recipe Generator")
 with help_col:
-    with st.container(key="chef_help_corner", horizontal_alignment="right"):
-        if st.button("Help", key="chef_help_btn", help="Open the kitchen help guide"):
-            show_help_dialog()
+    with st.container(horizontal=True, horizontal_alignment="right"):
+        with st.container(key="chef_about_corner"):
+            if st.button("About", key="chef_about_btn", help="About this app"):
+                show_about_dialog()
+        with st.container(key="chef_help_corner"):
+            if st.button("Help", key="chef_help_btn", help="Open the kitchen help guide"):
+                show_help_dialog()
 leave_failed = st.session_state.pop("leave_failed", None)
 if leave_failed:
     st.error(leave_failed)
 
 house_name = st.session_state.get("household_name") or "Household"
 invite = st.session_state.get("household_invite") or ""
-gemini_key = ""
-ollama_model = "llama3.2"
 ai_provider = "Google Gemini API"
+ollama_model = "llama3.2"
+try:
+    gemini_key = st.secrets.get("GEMINI_API_KEY", "")
+except Exception:
+    gemini_key = ""
 
 with st.sidebar.expander(f"🏠 {house_name}", expanded=False):
     st.caption("☁️ Connected to Supabase")
@@ -3090,26 +3161,8 @@ preferred_system = st.sidebar.radio(
     on_change=_on_pref_unit_system_change,
 )
 servings = st.sidebar.number_input("Number of Servings:", min_value=1, max_value=12, value=4)
-
-with st.sidebar.expander("⚙️ AI & Configuration", expanded=False):
-    ai_provider = st.radio(
-        "Select AI Engine:",
-        ["Google Gemini API", "Local Ollama (CPU)"],
-        key="sidebar_ai_provider",
-    )
-    if ai_provider == "Google Gemini API":
-        try:
-            gemini_key = st.secrets.get("GEMINI_API_KEY", "")
-        except Exception:
-            gemini_key = ""
-        if not gemini_key:
-            gemini_key = st.text_input("Gemini API Key:", type="password")
-        else:
-            st.success("🔑 Gemini API Key loaded securely from secrets!")
-    else:
-        ollama_model = st.text_input("Ollama Model Name:", value="llama3.2")
-        st.caption("Ensure Ollama is running (`ollama run llama3.2`) on port 11434.")
-
+if not gemini_key:
+    gemini_key = st.sidebar.text_input("Gemini API Key:", type="password")
 st.sidebar.caption(f"Pantry Chef  ·  v{APP_VERSION}")
 
 # --- MAIN NAVIGATION TABS ---
