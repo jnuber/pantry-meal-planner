@@ -294,3 +294,12 @@ grant execute on function join_household(text) to authenticated;
 grant execute on function leave_household() to authenticated;
 grant execute on function delete_household() to authenticated;
 grant execute on function save_household_prefs(jsonb, jsonb, text, integer) to authenticated;
+
+-- Default Postgres grants EXECUTE to PUBLIC. Revoke from anon/public so the
+-- publishable key cannot call these SECURITY DEFINER RPCs until someone is signed in.
+revoke all on function current_household_ids() from public, anon;
+revoke all on function create_household(text) from public, anon;
+revoke all on function join_household(text) from public, anon;
+revoke all on function leave_household() from public, anon;
+revoke all on function delete_household() from public, anon;
+revoke all on function save_household_prefs(jsonb, jsonb, text, integer) from public, anon;
